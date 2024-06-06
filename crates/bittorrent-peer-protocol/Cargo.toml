@@ -1,0 +1,10 @@
+[package]
+name = "bittorrent-peer-protocol"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", default-features = false }
+bitvec = "1.0.1"
+bytes = "1.5.0"
+thiserror = "1.0"

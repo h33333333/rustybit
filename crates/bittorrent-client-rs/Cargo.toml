@@ -1,0 +1,33 @@
+[package]
+name = "bittorrent-client-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bittorrent-peer-protocol.workspace = true
+clap = { version = "4.3.14", features = ["derive"] }
+tokio = { version = "1", features = [
+  "fs",
+  "net",
+  "io-util",
+  "macros",
+  "rt-multi-thread",
+] }
+serde = { version = "1.0", features = ["derive"] }
+serde_bencode = "^0.2.3"
+thiserror = "1.0"
+serde_with = "3.1.0"
+sha1 = "0.10.5"
+rand = "0.8.5"
+reqwest = { version = "0.12.4", features = ["json", "gzip"] }
+serde_urlencoded = "0.7"
+form_urlencoded = "1.2.0"
+hex = "0.4.3"
+hyper = { version = "1.1.0", features = ["client", "full"] }
+hyper-util = { version = "0.1.2", features = ["full"] }
+http-body-util = "0.1.0"
+url = "2.5.0"
+serde_json = "1.0.108"
+socket2 = "0.5.5"
+bitvec = "1.0.1"
+bytes = "1.5.0"

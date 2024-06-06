@@ -1,0 +1,242 @@
+use std::borrow::Cow;
+use std::fs;
+use std::io::Read;
+use std::sync::Arc;
+use std::time::Duration;
+
+use bittorrent_client_rs::tracker::TrackerRequest;
+use bittorrent_client_rs::util::generate_peer_id;
+use bittorrent_client_rs::{args, parser, tracker, try_into, Peer, TorrentMode};
+use bittorrent_client_rs::{Error, Result};
+use bittorrent_client_rs::{Torrent, TorrentSharedState};
+use bittorrent_peer_protocol::{Encode, Handshake};
+use clap::Parser;
+use tokio::io::BufReader;
+use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::{broadcast, RwLock};
+use url::Url;
+
+// TODO: send KeepAlive to peers
+
+async fn params(url: &str, request: TrackerRequest<'_>) -> Url {
+    let mut url = Url::parse(url).unwrap();
+
+    let mut query = request.into_query_params();
+
+    // NOTE: Some trackers include additional query params in the announce URL.
+    // Some even require them to be the first ones in the query, so we have
+    // to reorder things a bit in order to be sure that this supports as much
+    // torrent trackers as possible
+    if let Some(existing_query) = url.query() {
+        query.insert_str(0, existing_query);
+        query.insert(existing_query.len(), '&');
+    }
+
+    url.set_query(Some(&query));
+
+    url
+}
+
+// TODO: torrents can stall if a piece had failed the checksum check and we try to get it from the same peer over and
+// over, receiving the same bad piece
+
+// TODO: download speed is slow (~0.7 MiB using 200 MiB ethernet). How can I make it at least 5-10 times faster?
+
+// TODO: add normal logging/error handling (use anyhow?)
+
+// TODO: global code refactoring/restructuring
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = args::Arguments::parse();
+    let torrent_file = read_torrent_file(&args.file)?;
+    let meta_info: parser::MetaInfo = serde_bencode::from_bytes(&torrent_file)?;
+    let peer_id = generate_peer_id();
+
+    let length = meta_info.info.files.as_ref().map_or_else(
+        || {
+            meta_info.info.length.ok_or(Error::InternalError(
+                "Malformed torrent file: both 'files' and 'length' fields are missing",
+            ))
+        },
+        |files| {
+            Ok(files.iter().fold(0, |mut acc, file| {
+                acc += file.length;
+                acc
+            }))
+        },
+    )?;
+
+    let request = tracker::TrackerRequest::new(
+        &peer_id,
+        meta_info.info.hash(),
+        &[None, None, Some(length)],
+        Some(tracker::EventType::Started),
+    );
+
+    dbg!(&request);
+
+    let tracker_announce_url = params(&meta_info.announce, request).await;
+
+    let client = reqwest::Client::builder().gzip(true).build().unwrap();
+    let response = client
+        .request(reqwest::Method::GET, tracker_announce_url)
+        .header("User-Agent", "RustyBitTorrent")
+        .send()
+        .await
+        .unwrap();
+
+    dbg!(&response);
+
+    let resp: tracker::TrackerResponse = serde_bencode::from_bytes(&response.bytes().await.unwrap()).unwrap();
+    // TODO: unwraps
+    let peers = resp.get_peers().unwrap().unwrap();
+
+    let mut handles = vec![];
+
+    let root_handle = tokio::spawn(async move {
+        // Arc is needed to share a single instance between all futures
+        let handshake_message = Arc::new(Handshake {
+            pstr: Cow::Borrowed("BitTorrent protocol"),
+            extension_bytes: 0,
+            info_hash: meta_info.info.hash(),
+            peer_id: Cow::Owned(peer_id.as_bytes().to_vec()),
+        });
+
+        let pieces_num = meta_info.info.pieces.len() / 20;
+        let piece_length = meta_info.info.piece_length;
+
+        // TODO: conversions
+        let last_piece_size = if (length / meta_info.info.piece_length) as usize == pieces_num {
+            meta_info.info.piece_length as usize
+        } else {
+            (length - (length / meta_info.info.piece_length) * meta_info.info.piece_length) as usize
+        };
+
+        let info_hash = meta_info.info.hash();
+
+        let torrent_state = Arc::new(RwLock::new(TorrentSharedState::new(pieces_num)?));
+
+        let (peer_event_tx, peer_event_rx) = unbounded_channel();
+        // TODO: capacity
+        let (broadcast_tx, _) = broadcast::channel(10);
+
+        let (new_peer_tx, new_peer_rx) = unbounded_channel();
+
+        let torrent_task = {
+            let mut base_path = fs::canonicalize(".")?;
+            // TODO: make this a CLI arg
+            base_path.push("downloads");
+
+            // Multi-file mode: add directory name
+            if meta_info.info.files.is_some() {
+                base_path.push(&meta_info.info.name);
+            }
+
+            let torrent_state = torrent_state.clone();
+            let broadcast_tx = broadcast_tx.clone();
+
+            tokio::spawn(async move {
+                let mode = TorrentMode::new(&meta_info.info, &base_path).await?;
+
+                let split_piece_hashes: Result<_> = meta_info
+                    .info
+                    .pieces
+                    .chunks(20)
+                    .map(|item| try_into!(item, [u8; 20]))
+                    .collect();
+
+                // TODO: this struct will most likely need peer_id in order to finish downloading
+                // torrents and send keep alives
+                let mut torrent = Torrent::new(
+                    torrent_state,
+                    info_hash,
+                    mode,
+                    split_piece_hashes?,
+                    piece_length,
+                    peer_event_rx,
+                    broadcast_tx,
+                    new_peer_rx,
+                );
+
+                torrent.handle().await?;
+
+                Ok::<(), Error>(())
+            })
+        };
+
+        let mut peer_connect_tasks = tokio::task::JoinSet::new();
+        for peer_address in peers {
+            println!("{}", peer_address);
+
+            let peer_broadcast_rx = broadcast_tx.subscribe();
+            let peer_state = torrent_state.clone();
+            let peer_event_tx = peer_event_tx.clone();
+            let new_peer_tx = new_peer_tx.clone();
+            let peer_handshake = handshake_message.clone();
+
+            peer_connect_tasks.spawn(async move {
+                let socket =
+                    match tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(peer_address))
+                        .await
+                    {
+                        Ok(ok) => ok,
+                        Err(_) => return None,
+                    };
+
+                let mut socket = match socket {
+                    Ok(sock) => sock,
+                    _ => return None,
+                };
+
+                println!("Connected to {}", peer_address);
+
+                peer_handshake.encode(&mut socket).await.unwrap();
+
+                let peer_ip = peer_address.ip().to_owned();
+
+                let (mut peer, peer_tx) = Peer::new(
+                    BufReader::new(socket),
+                    peer_state,
+                    peer_broadcast_rx,
+                    peer_event_tx,
+                    peer_ip,
+                    Some(info_hash),
+                    (piece_length as usize, last_piece_size),
+                );
+
+                new_peer_tx.send((peer_ip, peer_tx)).unwrap();
+
+                Some(tokio::spawn(async move { peer.handle().await.unwrap() }))
+            });
+        }
+
+        while let Some(result) = peer_connect_tasks.join_next().await {
+            if let Some(handle) = result.unwrap() {
+                handles.push(handle);
+            }
+        }
+
+        drop(new_peer_tx);
+        drop(peer_event_tx);
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        torrent_task.await.unwrap()?;
+
+        Ok::<(), Error>(())
+    });
+
+    root_handle.await.unwrap()?;
+
+    Ok(())
+}
+
+fn read_torrent_file(path: &str) -> Result<Vec<u8>> {
+    let mut buffer = vec![];
+    let mut file = fs::File::open(path)?;
+    file.read_to_end(&mut buffer)?;
+    Ok(buffer)
+}

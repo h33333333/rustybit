@@ -1,0 +1,5 @@
+[workspace]
+members = ["crates/*"]
+
+[workspace.dependencies]
+bittorrent-peer-protocol = { path = "./crates/bittorrent-peer-protocol/" }
