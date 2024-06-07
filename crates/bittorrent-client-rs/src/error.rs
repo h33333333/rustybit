@@ -5,7 +5,7 @@ use thiserror::Error;
 
 pub type Result<T> = result::Result<T, Error>;
 
-#[derive(Error)]
+#[derive(Error, Debug)]
 pub enum Error {
     #[error("error while parsing the torrent file: {0}")]
     ParsingError(#[from] serde_bencode::error::Error),
@@ -21,11 +21,4 @@ pub enum Error {
     WrongPieceIndex(u32, u32),
     #[error("error while encoding or decoding a bittorrent message: {0}")]
     BittorentProtocolError(#[from] bittorrent_peer_protocol::Error),
-}
-
-impl Debug for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)?;
-        Ok(())
-    }
 }

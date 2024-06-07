@@ -1,3 +1,4 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_bencode::ser;
 use serde_with::{serde_as, Bytes};
@@ -44,11 +45,10 @@ pub struct Info {
 
 impl Info {
     /// SHA1 Hash of bencoded self
-    pub fn hash(&self) -> [u8; 20] {
-        // TODO: unwrap?
-        let serialized_struct = ser::to_bytes(self).unwrap();
+    pub fn hash(&self) -> anyhow::Result<[u8; 20]> {
+        let serialized_struct = ser::to_bytes(self).context("serializing torrent's Info failed")?;
         let hasher = Sha1::new_with_prefix(serialized_struct);
-        hasher.finalize().into()
+        Ok(hasher.finalize().into())
     }
 }
 

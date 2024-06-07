@@ -1,6 +1,7 @@
 use crate::Result;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, Bytes};
 
@@ -54,20 +55,19 @@ impl<'a> TrackerRequest<'a> {
         }
     }
 
-    pub fn into_query_params(self) -> String {
+    pub fn into_query_params(self) -> anyhow::Result<String> {
         let info_hash = form_urlencoded::byte_serialize(&self.info_hash).collect::<String>();
 
         // HACK: Serialize everything but `info_hash`. I didn't find a way to properly serialize it,
         // as serde can't serialize arrays and I also can't use URL encoding on the array to make it
         // a String before serializing with Serde, as that results in double URL encoding
-        // TODO: unwrap
-        let mut serialized = serde_urlencoded::to_string(self).unwrap();
+        let mut serialized = serde_urlencoded::to_string(self).context("failed to serialize the tracker request")?;
 
         // Add `peer_id`
         serialized.push_str("&info_hash=");
         serialized.push_str(&info_hash);
 
-        serialized
+        Ok(serialized)
     }
 }
 

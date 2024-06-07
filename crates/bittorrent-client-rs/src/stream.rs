@@ -120,6 +120,7 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> FramedStream<S> {
         // Read from stream until we get a handshake
         loop {
             if !self.frame.is_empty() {
+                // We have at least 1 byte, checked above
                 let pstr_length = self.frame.peek_bytes(1).unwrap()[0] as usize;
 
                 if self.frame.len() >= Handshake::FIXED_PART_LENGTH + pstr_length {
