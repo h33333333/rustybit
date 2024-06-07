@@ -4,6 +4,7 @@ use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::{bail, Context};
 use bittorrent_client_rs::tracker::TrackerRequest;
 use bittorrent_client_rs::util::generate_peer_id;
 use bittorrent_client_rs::{args, parser, tracker, try_into, Peer, TorrentMode};
@@ -18,10 +19,10 @@ use url::Url;
 
 // TODO: send KeepAlive to peers
 
-async fn params(url: &str, request: TrackerRequest<'_>) -> Url {
-    let mut url = Url::parse(url).unwrap();
+fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
+    let mut url = Url::parse(url).context("tracker announce URL parsing")?;
 
-    let mut query = request.into_query_params();
+    let mut query = request.into_query_params()?;
 
     // NOTE: Some trackers include additional query params in the announce URL.
     // Some even require them to be the first ones in the query, so we have
@@ -34,7 +35,7 @@ async fn params(url: &str, request: TrackerRequest<'_>) -> Url {
 
     url.set_query(Some(&query));
 
-    url
+    Ok(url)
 }
 
 // TODO: torrents can stall if a piece had failed the checksum check and we try to get it from the same peer over and
@@ -47,7 +48,7 @@ async fn params(url: &str, request: TrackerRequest<'_>) -> Url {
 // TODO: global code refactoring/restructuring
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
     let args = args::Arguments::parse();
     let torrent_file = read_torrent_file(&args.file)?;
     let meta_info: parser::MetaInfo = serde_bencode::from_bytes(&torrent_file)?;
@@ -67,30 +68,44 @@ async fn main() -> Result<()> {
         },
     )?;
 
+    // TODO: calculate how many bytes we already downloaded
     let request = tracker::TrackerRequest::new(
         &peer_id,
-        meta_info.info.hash(),
+        meta_info.info.hash()?,
         &[None, None, Some(length)],
         Some(tracker::EventType::Started),
     );
 
     dbg!(&request);
 
-    let tracker_announce_url = params(&meta_info.announce, request).await;
+    let tracker_announce_url = params(&meta_info.announce, request)?;
 
-    let client = reqwest::Client::builder().gzip(true).build().unwrap();
+    let client = reqwest::Client::builder()
+        .gzip(true)
+        .build()
+        .context("building reqwest client")?;
+
     let response = client
         .request(reqwest::Method::GET, tracker_announce_url)
         .header("User-Agent", "RustyBitTorrent")
         .send()
         .await
-        .unwrap();
+        .context("sending request to the tracker")?;
 
     dbg!(&response);
 
-    let resp: tracker::TrackerResponse = serde_bencode::from_bytes(&response.bytes().await.unwrap()).unwrap();
-    // TODO: unwraps
-    let peers = resp.get_peers().unwrap().unwrap();
+    let resp: tracker::TrackerResponse = serde_bencode::from_bytes(
+        &response
+            .bytes()
+            .await
+            .context("unable to get the tracker's response body")?,
+    )
+    .context("error while parsing the tracker's response")?;
+
+    let peers = match resp.get_peers() {
+        Some(peers) => peers?,
+        None => bail!("peers are missing in the tracker response"),
+    };
 
     let mut handles = vec![];
 
@@ -99,7 +114,7 @@ async fn main() -> Result<()> {
         let handshake_message = Arc::new(Handshake {
             pstr: Cow::Borrowed("BitTorrent protocol"),
             extension_bytes: 0,
-            info_hash: meta_info.info.hash(),
+            info_hash: meta_info.info.hash()?,
             peer_id: Cow::Owned(peer_id.as_bytes().to_vec()),
         });
 
@@ -113,7 +128,7 @@ async fn main() -> Result<()> {
             (length - (length / meta_info.info.piece_length) * meta_info.info.piece_length) as usize
         };
 
-        let info_hash = meta_info.info.hash();
+        let info_hash = meta_info.info.hash()?;
 
         let torrent_state = Arc::new(RwLock::new(TorrentSharedState::new(pieces_num)?));
 
@@ -161,7 +176,7 @@ async fn main() -> Result<()> {
 
                 torrent.handle().await?;
 
-                Ok::<(), Error>(())
+                Ok::<(), anyhow::Error>(())
             })
         };
 
@@ -181,17 +196,19 @@ async fn main() -> Result<()> {
                         .await
                     {
                         Ok(ok) => ok,
-                        Err(_) => return None,
+                        // TODO: log error?
+                        Err(_) => return Ok(None),
                     };
 
                 let mut socket = match socket {
                     Ok(sock) => sock,
-                    _ => return None,
+                    // TODO: log error?
+                    _ => return Ok(None),
                 };
 
                 println!("Connected to {}", peer_address);
 
-                peer_handshake.encode(&mut socket).await.unwrap();
+                peer_handshake.encode(&mut socket).await?;
 
                 let peer_ip = peer_address.ip().to_owned();
 
@@ -205,14 +222,19 @@ async fn main() -> Result<()> {
                     (piece_length as usize, last_piece_size),
                 );
 
-                new_peer_tx.send((peer_ip, peer_tx)).unwrap();
+                new_peer_tx
+                    .send((peer_ip, peer_tx))
+                    .context("failed sending new peer's event sender")?;
 
-                Some(tokio::spawn(async move { peer.handle().await.unwrap() }))
+                Ok::<_, anyhow::Error>(Some(tokio::spawn(async move { peer.handle().await })))
             });
         }
 
         while let Some(result) = peer_connect_tasks.join_next().await {
-            if let Some(handle) = result.unwrap() {
+            if let Some(handle) = result
+                .context("a peer connect task has failed to execute")?
+                .context("establishing connection with peer failed")?
+            {
                 handles.push(handle);
             }
         }
@@ -221,17 +243,18 @@ async fn main() -> Result<()> {
         drop(peer_event_tx);
 
         for handle in handles {
-            handle.await.unwrap();
+            handle.await.context("error in peer handler")??;
         }
 
-        torrent_task.await.unwrap()?;
+        torrent_task.await.context("error in torrent handler")??;
 
-        Ok::<(), Error>(())
+        Ok::<(), anyhow::Error>(())
     });
 
-    root_handle.await.unwrap()?;
-
-    Ok(())
+    root_handle
+        .await
+        .context("failed to execute the root task")?
+        .context("error while executing the root task")
 }
 
 fn read_torrent_file(path: &str) -> Result<Vec<u8>> {
