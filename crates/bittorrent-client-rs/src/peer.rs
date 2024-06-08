@@ -2,8 +2,10 @@ use std::io::Write;
 use std::net::Ipv4Addr;
 use std::{sync::Arc, time::SystemTime};
 
+use anyhow::Context;
 use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::{self};
 use tokio::sync::mpsc::{self};
 use tokio::{
@@ -102,12 +104,11 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
         (peer, tx)
     }
 
-    pub async fn handle(&mut self) -> Result<()> {
+    pub async fn handle(&mut self) -> anyhow::Result<()> {
         // handle handshake
         let data_length = self.stream.find_handshake_length().await?;
         let Some(data) = self.stream.read_bytes(data_length) else {
-            // TODO: raise error
-            return Ok(());
+            anyhow::bail!("bug: missing handshake bytes?");
         };
         let handshake = Handshake::decode(data)?;
         println!("Got handshake: {:?}", handshake);
@@ -127,21 +128,31 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
                     println!("find message len: {:?}", start.elapsed().unwrap());
                     if let Some(length) = length? {
                         let Some(data) = self.stream.read_bytes(length) else {
-                            // TODO: raise an error
-                            return Ok(());
+                            anyhow::bail!("bug: missing message bytes?");
                         };
 
                         println!("read bytes: {:?}", start.elapsed().unwrap());
                         let message = BittorrentP2pMessage::decode(data)?;
                         println!("decode: {:?}", start.elapsed().unwrap());
-                        self.handle_message(message, &mut output_frame).await?;
+                        self.handle_message(message).await?;
                     }
                 }
                 system_event = self.broadcast_rx.recv() => {
-                        // TODO: Unwrap
-                    if !self.handle_system_event(system_event.unwrap(), &mut output_frame).await? {
-                        break;
-                    };
+                        match system_event {
+                            Ok(event) => {
+                                if !self.handle_system_event(event, &mut output_frame).await? {
+                                    // We can finish
+                                    break;
+                                };
+                            }
+                            Err(recv_error) => {
+                                match recv_error {
+                                    RecvError::Closed =>
+                                        anyhow::bail!("bug: system event channel was closed before all peers finished?"),
+                                    RecvError::Lagged(_) => todo!("Log"),
+                                }
+                            }
+                        }
                 }
                 result = self.rx.recv() => {
                     if let Some(peer_event) = result {
@@ -190,10 +201,10 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
 
                     println!("Peer {} exiting", self.peer_ip);
 
-                    // Send all leftover queued messages (if any)
-                    self.stream.flush_to_stream(&output_frame).await?;
-                    // TODO: unwrap
-                    self.tx.send((self.peer_ip, PeerEvent::Disconnected)).unwrap();
+                    self.tx
+                        .send((self.peer_ip, PeerEvent::Disconnected))
+                        .context("Error while sending a Disconnected peer event")?;
+
                     break;
                 }
             }
@@ -216,10 +227,13 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
             output_frame.clear();
         }
 
+        // Send all queued messages (if any)
+        self.stream.flush_to_stream(&output_frame).await?;
+
         Ok(())
     }
 
-    async fn handle_system_event(&mut self, event: SystemEvent, output_frame: &mut Vec<u8>) -> Result<bool> {
+    async fn handle_system_event(&mut self, event: SystemEvent, output_frame: &mut Vec<u8>) -> anyhow::Result<bool> {
         match event {
             // Inform the peer that we have a new piece available
             // TODO: cancellation?
@@ -240,8 +254,9 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
             SystemEvent::DownloadFinished => {
                 println!("Peer {} exiting", self.peer_ip);
 
-                // TODO: unwrap
-                self.tx.send((self.peer_ip, PeerEvent::Disconnected)).unwrap();
+                self.tx
+                    .send((self.peer_ip, PeerEvent::Disconnected))
+                    .context("Error while sending a Disconnected peer event")?;
 
                 return Ok(false);
             }
@@ -321,7 +336,7 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
         Ok(BittorrentP2pMessage::Have(piece_idx).encode(output_frame).await?)
     }
 
-    async fn handle_message(&mut self, message: BittorrentP2pMessage, output_frame: &mut Vec<u8>) -> Result<()> {
+    async fn handle_message(&mut self, message: BittorrentP2pMessage) -> anyhow::Result<()> {
         use BittorrentP2pMessage::*;
 
         match message {
@@ -339,7 +354,7 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
                 } else {
                     // TODO: should this be an error or should we create an empty bitvec at the
                     // beggining?
-                    todo!("Have message received while having an empty bitvec");
+                    anyhow::bail!("bug: have message received while having an empty bitvec");
                 }
             }
             Bitfield(mut bitvec) => {
@@ -361,23 +376,24 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
             }
             Piece { index, begin, block } => {
                 if self.in_flight_piece.is_none() {
-                    // TODO: return error?
-                    todo!("Raise an error")
+                    anyhow::bail!("bug: received a block while not downloading a piece");
                 }
 
                 if self
                     .in_flight_piece
                     .is_some_and(|(stored_index, _)| stored_index != index)
                 {
-                    // TODO: raise an error
-                    todo!("Raise an error")
+                    anyhow::bail!("bug: received piece and the in-flight one have different indexes");
                 }
 
                 let begin = try_into!(begin, usize)?;
 
                 if begin + block.len() > self.piece_size {
-                    // TODO: raise an error
-                    todo!("Raise an error")
+                    anyhow::bail!(
+                        "bug: received piece has larger size than expected: {} vs {}",
+                        begin + block.len(),
+                        self.piece_size
+                    );
                 }
 
                 (&mut self.piece_buf[begin..begin + block.len()]).write_all(&block)?;
@@ -398,10 +414,9 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
                     // Remove additional zeroes if the downloaded piece was the last one
                     piece.truncate(piece_size);
 
-                    // TODO: error handling
                     self.tx
                         .send((self.peer_ip, PeerEvent::PieceDownloaded(index, piece)))
-                        .unwrap();
+                        .context("Error while sending a PieceDownloaded peer event")?;
                 }
             }
             Cancel { index, begin, length } => {
