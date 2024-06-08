@@ -17,8 +17,6 @@ use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::{broadcast, RwLock};
 use url::Url;
 
-// TODO: send KeepAlive to peers
-
 fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
     let mut url = Url::parse(url).context("tracker announce URL parsing")?;
 
@@ -37,6 +35,8 @@ fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
 
     Ok(url)
 }
+
+// TODO: send KeepAlive to peers
 
 // TODO: torrents can stall if a piece had failed the checksum check and we try to get it from the same peer over and
 // over, receiving the same bad piece
