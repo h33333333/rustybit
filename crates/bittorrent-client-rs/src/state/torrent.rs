@@ -3,6 +3,7 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::{anyhow, Context};
 use bitvec::bitvec;
 use bitvec::order::Msb0;
 use bitvec::{slice::BitSlice, vec::BitVec};
@@ -16,7 +17,7 @@ use crate::{Error, Result};
 
 use super::event::PeerEvent;
 use super::event::SystemEvent;
-use super::util::calculate_piece_hash;
+use super::util::{calculate_piece_hash, write_to_file};
 
 pub struct TorrentFileInfo<'a> {
     path: PathBuf,
@@ -188,7 +189,7 @@ impl<'a> Torrent<'a> {
         }
     }
 
-    pub async fn handle(&mut self) -> Result<()> {
+    pub async fn handle(&mut self) -> anyhow::Result<()> {
         loop {
             tokio::select! {
                 result = self.rx.recv() => {
@@ -198,13 +199,21 @@ impl<'a> Torrent<'a> {
                                 match self.add_piece(piece_idx, piece).await {
                                     Ok(()) =>  {
                                         if self.shared_state.read().await.finished_downloading() {
-                                            // TODO: unwrap
-                                            self.tx.send(SystemEvent::DownloadFinished).unwrap();
+                                            self.tx.send(SystemEvent::DownloadFinished)
+                                                .context("Error while broadcasting a system event")?;
                                         }
                                     }
+                                    // TODO: log error
                                     Err(e) => {
-                                        // TODO: unwrap
-                                        self.tx.send(SystemEvent::PieceFailed(piece_idx)).unwrap();
+                                        // TODO: track how many bad pieces a peer sent and
+                                        // disconnect him?
+                                        if let Error::InternalError(message) = e {
+                                            return Err(
+                                                anyhow!("An unrecoverable error happened while adding a piece: {}", message)
+                                            );
+                                        }
+                                        self.tx.send(SystemEvent::PieceFailed(piece_idx))
+                                            .context("Error while broadcasting a system event")?;
                                     }
                                 }
                             }
@@ -221,7 +230,6 @@ impl<'a> Torrent<'a> {
                 },
                 result = self.peer_rx.recv() => {
                     if let Some((peer_ip, peer_tx_channel)) = result {
-                        println!("New peer channel: {}", peer_ip);
                         self.peer_channels.insert(peer_ip, peer_tx_channel);
                     };
                 }
@@ -234,7 +242,6 @@ impl<'a> Torrent<'a> {
     /// Sends [crate::p2p::messages::BittorrentP2pMessage::Have] message to all peers with the
     /// provided piece index.
     async fn add_piece(&mut self, idx: u32, piece: Vec<u8>) -> Result<()> {
-        // TODO: error handling
         let piece_hash = calculate_piece_hash(piece.as_ref());
 
         let Some(expected_piece_hash) = self.get_piece_hash(try_into!(idx, usize)?) else {
@@ -245,7 +252,6 @@ impl<'a> Torrent<'a> {
         };
 
         if piece_hash.as_ref() != expected_piece_hash {
-            println!("\t\t PIECE {} FAILED", idx);
             self.shared_state.write().await.failed_pieces.push(idx);
 
             // TODO: I probably should keep track of which peers send bad pieces and disconnect from them
@@ -257,26 +263,12 @@ impl<'a> Torrent<'a> {
             TorrentMode::SingleFile(file_info) => {
                 // TODO: opening a file each time seems wasteful.
                 // Can I buffer say 5 pieces and then write them together to the file?
-                let mut file = fs::OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .open(&file_info.path)
-                    .await
-                    .unwrap();
-
-                // TODO: conv
-                file.seek(std::io::SeekFrom::Start(idx as u64 * self.piece_length))
-                    .await
-                    .unwrap();
-
-                file.write_all(&piece).await.unwrap();
+                write_to_file(&file_info.path, Into::<u64>::into(idx), &piece).await?;
             }
             TorrentMode::MultiFile(file_infos) => {
-                // NOTE: This doesn't represent an offset into a concrete file
-                // TODO: conv
-                let global_piece_offset = idx as u64 * self.piece_length;
+                let global_piece_offset = Into::<u64>::into(idx) * self.piece_length;
 
-                let (file_idx, offset, bytes_to_write) = file_infos
+                let Some((file_idx, offset, bytes_to_write)) = file_infos
                     .iter()
                     .enumerate()
                     .scan(0, |state, (file_idx, file_info)| {
@@ -306,38 +298,35 @@ impl<'a> Torrent<'a> {
                         }
                     })
                     .find(|el| el.is_some())
-                    .expect("Unable to find a matching file in the multi-file mode")
-                    // TODO: unwrap
-                    .unwrap();
+                    // We use nested Option to make scan traverse the collection as long as we need
+                    // instead of stopping at the first None. The first one is always going be
+                    // Some.
+                    .expect("bug: scan returned None?")
+                else {
+                    return Err(Error::InternalError("bug: failed to find a matching file for a piece?"));
+                };
 
-                let (current_file_bytes, next_file_bytes) = piece.split_at(bytes_to_write as usize);
+                let (current_file_bytes, next_file_bytes) = piece.split_at(try_into!(bytes_to_write, usize)?);
 
-                let path = &file_infos.get(file_idx).unwrap().path;
+                let path = &file_infos
+                    .get(file_idx)
+                    .ok_or_else(|| Error::InternalError("bug: scan found an out-of-bounds index?"))?
+                    .path;
 
-                let mut file = fs::OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .open(path)
-                    .await
-                    .unwrap();
+                write_to_file(path, offset, current_file_bytes).await?;
 
-                file.seek(std::io::SeekFrom::Start(offset)).await.unwrap();
-
-                file.write_all(current_file_bytes).await.unwrap();
-
+                // Piece that crosses the file bondary
                 if !next_file_bytes.is_empty() {
-                    // Write to the second file
-                    let path = &file_infos.get(file_idx + 1).unwrap().path;
-                    let mut file = fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(path)
-                        .await
-                        .unwrap();
+                    let path = &file_infos
+                        .get(file_idx + 1)
+                        .ok_or_else(|| {
+                            Error::InternalError(
+                                "bug: a piece that crosses the file boundary doesn't have the `next` file?",
+                            )
+                        })?
+                        .path;
 
-                    file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
-
-                    file.write_all(next_file_bytes).await.unwrap();
+                    write_to_file(path, 0, next_file_bytes).await?;
                 }
             }
         }
@@ -347,10 +336,9 @@ impl<'a> Torrent<'a> {
             .await
             .add_downloaded_piece(try_into!(idx, usize)?);
 
-        println!("Downloaded new piece: {}", idx);
-
-        // TODO: handle error
-        self.tx.send(SystemEvent::NewPieceAdded(idx)).unwrap();
+        self.tx
+            .send(SystemEvent::NewPieceAdded(idx))
+            .map_err(|_| Error::InternalError("Failed to send a system event"))?;
 
         Ok(())
     }
