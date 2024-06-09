@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
+use bittorrent_client_rs::logging::setup_logger;
 use bittorrent_client_rs::tracker::TrackerRequest;
 use bittorrent_client_rs::util::generate_peer_id;
 use bittorrent_client_rs::{args, parser, tracker, try_into, Peer, TorrentMode};
@@ -15,6 +16,7 @@ use clap::Parser;
 use tokio::io::BufReader;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::{broadcast, RwLock};
+use tracing::Instrument;
 use url::Url;
 
 fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
@@ -41,14 +43,20 @@ fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
 // TODO: torrents can stall if a piece had failed the checksum check and we try to get it from the same peer over and
 // over, receiving the same bad piece
 
-// TODO: download speed is slow (~0.7 MiB using 200 MiB ethernet). How can I make it at least 5-10 times faster?
+// TODO: download speed is slow (~0.7 MiB using 1 GiB ethernet). How can I make it at least 5-10 times faster?
 
 // TODO: add normal logging/error handling (use anyhow?)
 
 // TODO: global code refactoring/restructuring
 
+// TODO: improve shutdown mechanisms
+// TODO: gather and show download stats
+
 #[tokio::main]
+#[tracing::instrument(err)]
 async fn main() -> anyhow::Result<()> {
+    setup_logger();
+
     let args = args::Arguments::parse();
     let torrent_file = read_torrent_file(&args.file)?;
     let meta_info: parser::MetaInfo = serde_bencode::from_bytes(&torrent_file)?;
@@ -76,8 +84,6 @@ async fn main() -> anyhow::Result<()> {
         Some(tracker::EventType::Started),
     );
 
-    dbg!(&request);
-
     let tracker_announce_url = params(&meta_info.announce, request)?;
 
     let client = reqwest::Client::builder()
@@ -91,8 +97,6 @@ async fn main() -> anyhow::Result<()> {
         .send()
         .await
         .context("sending request to the tracker")?;
-
-    dbg!(&response);
 
     let resp: tracker::TrackerResponse = serde_bencode::from_bytes(
         &response
@@ -182,52 +186,67 @@ async fn main() -> anyhow::Result<()> {
 
         let mut peer_connect_tasks = tokio::task::JoinSet::new();
         for peer_address in peers {
-            println!("{}", peer_address);
-
             let peer_broadcast_rx = broadcast_tx.subscribe();
             let peer_state = torrent_state.clone();
             let peer_event_tx = peer_event_tx.clone();
             let new_peer_tx = new_peer_tx.clone();
             let peer_handshake = handshake_message.clone();
 
-            peer_connect_tasks.spawn(async move {
-                let socket =
-                    match tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(peer_address))
-                        .await
+            peer_connect_tasks.spawn(
+                async move {
+                    tracing::trace!("Trying a new peer");
+
+                    let socket = match tokio::time::timeout(
+                        Duration::from_secs(10),
+                        tokio::net::TcpStream::connect(peer_address),
+                    )
+                    .await
                     {
                         Ok(ok) => ok,
-                        // TODO: log error?
-                        Err(_) => return Ok(None),
+                        Err(e) => {
+                            tracing::debug!(
+                                error = %e,
+                                "Peer connection timeout"
+                            );
+                            return Ok(None);
+                        }
                     };
 
-                let mut socket = match socket {
-                    Ok(sock) => sock,
-                    // TODO: log error?
-                    _ => return Ok(None),
-                };
+                    let mut socket = match socket {
+                        Ok(sock) => sock,
+                        Err(e) => {
+                            tracing::debug!(
+                                error = %e,
+                                "Error while establishing connection"
+                            );
+                            return Ok(None);
+                        }
+                    };
 
-                println!("Connected to {}", peer_address);
+                    tracing::info!("Connected");
 
-                peer_handshake.encode(&mut socket).await?;
+                    peer_handshake.encode(&mut socket).await?;
 
-                let peer_ip = peer_address.ip().to_owned();
+                    let peer_ip = peer_address.ip().to_owned();
 
-                let (mut peer, peer_tx) = Peer::new(
-                    BufReader::new(socket),
-                    peer_state,
-                    peer_broadcast_rx,
-                    peer_event_tx,
-                    peer_ip,
-                    Some(info_hash),
-                    (piece_length as usize, last_piece_size),
-                );
+                    let (mut peer, peer_tx) = Peer::new(
+                        BufReader::new(socket),
+                        peer_state,
+                        peer_broadcast_rx,
+                        peer_event_tx,
+                        peer_ip,
+                        Some(info_hash),
+                        (piece_length as usize, last_piece_size),
+                    );
 
-                new_peer_tx
-                    .send((peer_ip, peer_tx))
-                    .context("failed sending new peer's event sender")?;
+                    new_peer_tx
+                        .send((peer_ip, peer_tx))
+                        .context("failed sending new peer's event sender")?;
 
-                Ok::<_, anyhow::Error>(Some(tokio::spawn(async move { peer.handle().await })))
-            });
+                    Ok::<_, anyhow::Error>(Some(tokio::spawn(async move { peer.handle().await })))
+                }
+                .instrument(tracing::info_span!("Peer connect task", addr = ?peer_address)),
+            );
         }
 
         while let Some(result) = peer_connect_tasks.join_next().await {

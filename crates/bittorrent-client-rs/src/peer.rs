@@ -23,6 +23,7 @@ use bittorrent_peer_protocol::{BittorrentP2pMessage, Decode, Encode, Handshake};
 const DEFAULT_BLOCK_SIZE: usize = 16_384;
 
 /// Represents a single peer
+#[derive(Debug)]
 pub struct Peer<S: AsyncReadExt + AsyncWriteExt + Unpin> {
     stream: FramedStream<S>,
     state: Arc<RwLock<TorrentSharedState>>,
@@ -63,7 +64,7 @@ pub struct Peer<S: AsyncReadExt + AsyncWriteExt + Unpin> {
     try_get_piece: bool,
 }
 
-impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
+impl<S: AsyncReadExt + AsyncWriteExt + Unpin + std::fmt::Debug> Peer<S> {
     pub fn new(
         stream: S,
         state: Arc<RwLock<TorrentSharedState>>,
@@ -104,36 +105,34 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
         (peer, tx)
     }
 
+    #[tracing::instrument(err, skip(self), fields(peer_ip = %self.peer_ip, client_state = ?[self.client_interested, self.client_choked, self.peer_interested, self.peer_choked]))]
     pub async fn handle(&mut self) -> anyhow::Result<()> {
         // handle handshake
         let data_length = self.stream.find_handshake_length().await?;
         let Some(data) = self.stream.read_bytes(data_length) else {
             anyhow::bail!("bug: missing handshake bytes?");
         };
-        let handshake = Handshake::decode(data)?;
-        println!("Got handshake: {:?}", handshake);
+        // TODO: should I use some field from it?
+        let _handshake = Handshake::decode(data)?;
 
         let mut output_frame = Vec::new();
 
         self.set_chocked(false, &mut output_frame).await?;
         self.set_interested(true, &mut output_frame).await?;
 
+        tracing::trace!("starting a peer loop");
         loop {
-            let start = SystemTime::now();
             tokio::select! {
                 // We can't use a pattern matching here to unpack Result because we want to check
                 // for a possible error
                 // TODO: won't this always trigger and burn CPU cycles?
                 length = self.stream.find_message_length() => {
-                    println!("find message len: {:?}", start.elapsed().unwrap());
                     if let Some(length) = length? {
                         let Some(data) = self.stream.read_bytes(length) else {
                             anyhow::bail!("bug: missing message bytes?");
                         };
 
-                        println!("read bytes: {:?}", start.elapsed().unwrap());
                         let message = BittorrentP2pMessage::decode(data)?;
-                        println!("decode: {:?}", start.elapsed().unwrap());
                         self.handle_message(message).await?;
                     }
                 }
@@ -162,7 +161,6 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
                     }
                 }
             }
-            println!("tokio::select: {:?}", start.elapsed().unwrap());
 
             if self.present_pieces.is_some()
                 && (self.in_flight_piece.is_none() && (self.client_interested || self.try_get_piece))
@@ -199,7 +197,7 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
                         self.set_interested(false, &mut output_frame).await?;
                     }
 
-                    println!("Peer {} exiting", self.peer_ip);
+                    tracing::trace!("peer exiting");
 
                     self.tx
                         .send((self.peer_ip, PeerEvent::Disconnected))
@@ -233,6 +231,7 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", ret, err, skip(self, output_frame))]
     async fn handle_system_event(&mut self, event: SystemEvent, output_frame: &mut Vec<u8>) -> anyhow::Result<bool> {
         match event {
             // Inform the peer that we have a new piece available
@@ -252,7 +251,7 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
                 }
             }
             SystemEvent::DownloadFinished => {
-                println!("Peer {} exiting", self.peer_ip);
+                tracing::trace!("peer exiting");
 
                 self.tx
                     .send((self.peer_ip, PeerEvent::Disconnected))
@@ -271,6 +270,7 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
     }
 
     /// Changes [Peer::client_interested] to the provided value
+    #[tracing::instrument(level = "trace", err, skip(self, output_frame))]
     async fn send_piece_request(&mut self, idx: u32, piece_size: usize, output_frame: &mut Vec<u8>) -> Result<()> {
         // // TODO: fix conversions
         // let (piece_idx, begin, block_size) = if let Some(piece_idx) = self.in_flight_piece {
@@ -300,6 +300,7 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", err, skip(self, output_frame))]
     async fn send_block_request(&self, index: u32, begin: u32, length: u32, output_frame: &mut Vec<u8>) -> Result<()> {
         Ok(BittorrentP2pMessage::Request { index, begin, length }
             .encode(output_frame)
@@ -307,6 +308,7 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
     }
 
     /// Sets [Peer::client_interested] to the provided value
+    #[tracing::instrument(level = "trace", err, skip(self, output_frame))]
     async fn set_interested(&mut self, client_interested: bool, output_frame: &mut Vec<u8>) -> Result<()> {
         if client_interested {
             BittorrentP2pMessage::Interested.encode(output_frame).await?;
@@ -320,6 +322,7 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
     }
 
     /// Sets [Peer::client_choked] to the provided value
+    #[tracing::instrument(level = "trace", err, skip(self, output_frame))]
     async fn set_chocked(&mut self, client_choked: bool, output_frame: &mut Vec<u8>) -> Result<()> {
         if client_choked {
             BittorrentP2pMessage::Choke.encode(output_frame).await?;
@@ -332,10 +335,12 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", err, skip(self, output_frame))]
     async fn send_have_message(&self, piece_idx: u32, output_frame: &mut Vec<u8>) -> Result<()> {
         Ok(BittorrentP2pMessage::Have(piece_idx).encode(output_frame).await?)
     }
 
+    #[tracing::instrument(level = "trace", err, skip_all)]
     async fn handle_message(&mut self, message: BittorrentP2pMessage) -> anyhow::Result<()> {
         use BittorrentP2pMessage::*;
 
@@ -362,17 +367,13 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
 
                 // remove spare bits
                 let piece_amount = state.get_number_of_pieces();
-                dbg!(state.get_number_of_pieces());
                 bitvec.truncate(piece_amount);
 
                 self.present_pieces = Some(bitvec);
             }
             Request { index, begin, length } => {
                 // TODO: allow peers to download from us
-                println!(
-                    "Received Request message: index {}, begin {}, length {}",
-                    index, begin, length
-                );
+                tracing::trace!(index, begin, length, "received a Request message from peer");
             }
             Piece { index, begin, block } => {
                 if self.in_flight_piece.is_none() {
@@ -420,18 +421,14 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin> Peer<S> {
                 }
             }
             Cancel { index, begin, length } => {
-                // TODO: allow peers to download from us
-                println!(
-                    "Received Cancel message: index {}, begin {}, length {}",
-                    index, begin, length
-                );
+                tracing::trace!(index, begin, length, "received a Cancel message from peer");
             }
             Port(port) => {
-                println!("Received Port message with: {}", port);
+                tracing::trace!(?port, "received a Port message");
             }
             KeepAlive => {
                 // TODO: what to do with it?
-                println!("Received a KeepAlive message");
+                tracing::trace!("received a KeepAlice message");
             }
         };
 

@@ -230,7 +230,6 @@ impl<'a> Decode<'a> for BittorrentP2pMessage {
                 // account for message id
                 let mut raw_bitfield = vec![0; length - 1];
                 src.copy_to_slice(&mut raw_bitfield);
-                dbg!(&raw_bitfield);
                 Self::Bitfield(BitVec::from_vec(raw_bitfield))
             }
             MessageId::Request => Self::Request {

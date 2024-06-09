@@ -2,6 +2,7 @@
 pub mod macros;
 
 pub mod args;
+pub mod logging;
 pub mod parser;
 pub mod tracker;
 pub mod util;

@@ -19,6 +19,7 @@ use super::event::PeerEvent;
 use super::event::SystemEvent;
 use super::util::{calculate_piece_hash, write_to_file};
 
+#[derive(Debug)]
 pub struct TorrentFileInfo<'a> {
     path: PathBuf,
     length: u64,
@@ -31,6 +32,7 @@ impl<'a> TorrentFileInfo<'a> {
     }
 }
 
+#[derive(Debug)]
 pub enum TorrentMode<'a> {
     SingleFile(TorrentFileInfo<'a>),
     MultiFile(Vec<TorrentFileInfo<'a>>),
@@ -84,6 +86,7 @@ impl<'a> TorrentMode<'a> {
 }
 
 /// State that each peer keeps a reference to
+#[derive(Debug)]
 pub struct TorrentSharedState {
     // Should have length equal to the total number of pieces
     last_piece_idx: u32,
@@ -148,6 +151,7 @@ impl TorrentSharedState {
     }
 }
 
+#[derive(Debug)]
 pub struct Torrent<'a> {
     shared_state: Arc<RwLock<TorrentSharedState>>,
     info_hash: [u8; 20],
@@ -189,6 +193,7 @@ impl<'a> Torrent<'a> {
         }
     }
 
+    #[tracing::instrument(err, skip(self))]
     pub async fn handle(&mut self) -> anyhow::Result<()> {
         loop {
             tokio::select! {
@@ -203,14 +208,12 @@ impl<'a> Torrent<'a> {
                                                 .context("Error while broadcasting a system event")?;
                                         }
                                     }
-                                    // TODO: log error
                                     Err(e) => {
+                                        tracing::debug!(error = %e, "Error while adding a piece");
                                         // TODO: track how many bad pieces a peer sent and
                                         // disconnect him?
                                         if let Error::InternalError(message) = e {
-                                            return Err(
-                                                anyhow!("An unrecoverable error happened while adding a piece: {}", message)
-                                            );
+                                            anyhow::bail!("An unrecoverable error happened while adding a piece: {}", message);
                                         }
                                         self.tx.send(SystemEvent::PieceFailed(piece_idx))
                                             .context("Error while broadcasting a system event")?;
@@ -241,18 +244,20 @@ impl<'a> Torrent<'a> {
     ///
     /// Sends [crate::p2p::messages::BittorrentP2pMessage::Have] message to all peers with the
     /// provided piece index.
-    async fn add_piece(&mut self, idx: u32, piece: Vec<u8>) -> Result<()> {
+    #[tracing::instrument(err, skip(self, piece))]
+    async fn add_piece(&mut self, index: u32, piece: Vec<u8>) -> Result<()> {
         let piece_hash = calculate_piece_hash(piece.as_ref());
 
-        let Some(expected_piece_hash) = self.get_piece_hash(try_into!(idx, usize)?) else {
+        let Some(expected_piece_hash) = self.get_piece_hash(try_into!(index, usize)?) else {
             return Err(Error::WrongPieceIndex(
-                idx,
+                index,
                 try_into!(self.shared_state.read().await.get_number_of_pieces(), u32)?,
             ));
         };
 
         if piece_hash.as_ref() != expected_piece_hash {
-            self.shared_state.write().await.failed_pieces.push(idx);
+            self.shared_state.write().await.failed_pieces.push(index);
+            tracing::warn!(expected = ?*expected_piece_hash, received = ?piece_hash, "Piece hash mismatch");
 
             // TODO: I probably should keep track of which peers send bad pieces and disconnect from them
             // after certain number of bad pieces
@@ -263,10 +268,10 @@ impl<'a> Torrent<'a> {
             TorrentMode::SingleFile(file_info) => {
                 // TODO: opening a file each time seems wasteful.
                 // Can I buffer say 5 pieces and then write them together to the file?
-                write_to_file(&file_info.path, Into::<u64>::into(idx), &piece).await?;
+                write_to_file(&file_info.path, Into::<u64>::into(index), &piece).await?;
             }
             TorrentMode::MultiFile(file_infos) => {
-                let global_piece_offset = Into::<u64>::into(idx) * self.piece_length;
+                let global_piece_offset = Into::<u64>::into(index) * self.piece_length;
 
                 let Some((file_idx, offset, bytes_to_write)) = file_infos
                     .iter()
@@ -334,11 +339,13 @@ impl<'a> Torrent<'a> {
         self.shared_state
             .write()
             .await
-            .add_downloaded_piece(try_into!(idx, usize)?);
+            .add_downloaded_piece(try_into!(index, usize)?);
 
         self.tx
-            .send(SystemEvent::NewPieceAdded(idx))
+            .send(SystemEvent::NewPieceAdded(index))
             .map_err(|_| Error::InternalError("Failed to send a system event"))?;
+
+        tracing::debug!("added new piece");
 
         Ok(())
     }
