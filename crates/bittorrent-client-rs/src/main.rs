@@ -46,12 +46,12 @@ fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
 
 // TODO: download speed is slow (~0.7 MiB using 1 GiB ethernet). How can I make it at least 5-10 times faster?
 
-// TODO: add normal logging/error handling (use anyhow?)
-
 // TODO: global code refactoring/restructuring
 
 // TODO: improve shutdown mechanisms
 
+// BUG: for some reason debian download errors randomly and the downloaded bytes are not being
+// saved to the disk
 
 #[tokio::main]
 #[tracing::instrument(err)]
