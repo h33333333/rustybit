@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use anyhow::{anyhow, Context};
 use bitvec::bitvec;
@@ -9,10 +10,11 @@ use bitvec::order::Msb0;
 use bitvec::{slice::BitSlice, vec::BitVec};
 use tokio::fs;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::mpsc::{self, UnboundedReceiver};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::{broadcast, RwLock};
 
 use crate::parser::Info;
+use crate::stats::StatsEntry;
 use crate::{Error, Result};
 
 use super::event::PeerEvent;
@@ -167,6 +169,8 @@ pub struct Torrent<'a> {
     tx: broadcast::Sender<SystemEvent>,
     /// Channel for receiving peer-event channels for new peers
     peer_rx: UnboundedReceiver<(Ipv4Addr, mpsc::Sender<PeerEvent>)>,
+    /// Channel for sending statistics to the corresponding task
+    stats_tx: UnboundedSender<StatsEntry>,
 }
 
 impl<'a> Torrent<'a> {
@@ -179,6 +183,7 @@ impl<'a> Torrent<'a> {
         rx: UnboundedReceiver<(Ipv4Addr, PeerEvent)>,
         tx: broadcast::Sender<SystemEvent>,
         peer_rx: UnboundedReceiver<(Ipv4Addr, mpsc::Sender<PeerEvent>)>,
+        stats_tx: UnboundedSender<StatsEntry>,
     ) -> Self {
         Torrent {
             shared_state: state,
@@ -190,6 +195,7 @@ impl<'a> Torrent<'a> {
             rx,
             tx,
             peer_rx,
+            stats_tx,
         }
     }
 
@@ -201,8 +207,14 @@ impl<'a> Torrent<'a> {
                     if let Some((peer_ip, event)) = result {
                         match event {
                             PeerEvent::PieceDownloaded(piece_idx, piece) => {
+                                let piece_size = piece.len();
                                 match self.add_piece(piece_idx, piece).await {
                                     Ok(()) =>  {
+                                        // Send stats to the collector
+                                        self.stats_tx.send(
+                                            StatsEntry::new(SystemTime::now(), self.peer_channels.len(), piece_size)
+                                        ).context("bug: stats collector exited before the torrent handler?")?;
+
                                         if self.shared_state.read().await.finished_downloading() {
                                             self.tx.send(SystemEvent::DownloadFinished)
                                                 .context("Error while broadcasting a system event")?;

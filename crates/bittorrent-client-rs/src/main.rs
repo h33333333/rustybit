@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use bittorrent_client_rs::logging::setup_logger;
+use bittorrent_client_rs::stats::stats;
 use bittorrent_client_rs::tracker::TrackerRequest;
 use bittorrent_client_rs::util::generate_peer_id;
 use bittorrent_client_rs::{args, parser, tracker, try_into, Peer, TorrentMode};
@@ -50,7 +51,7 @@ fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
 // TODO: global code refactoring/restructuring
 
 // TODO: improve shutdown mechanisms
-// TODO: gather and show download stats
+
 
 #[tokio::main]
 #[tracing::instrument(err)]
@@ -138,9 +139,15 @@ async fn main() -> anyhow::Result<()> {
 
         let (peer_event_tx, peer_event_rx) = unbounded_channel();
         // TODO: capacity
-        let (broadcast_tx, _) = broadcast::channel(10);
+        let (broadcast_tx, _) = broadcast::channel(30);
 
         let (new_peer_tx, new_peer_rx) = unbounded_channel();
+
+        let (stats_tx, stats_rx) = tokio::sync::mpsc::unbounded_channel();
+        let stats_task = tokio::spawn(async move {
+            let length = try_into!(length, usize).context("starting a stats task")?;
+            stats(0, length, length, stats_rx).await
+        });
 
         let torrent_task = {
             let mut base_path = fs::canonicalize(".")?;
@@ -176,6 +183,7 @@ async fn main() -> anyhow::Result<()> {
                     peer_event_rx,
                     broadcast_tx,
                     new_peer_rx,
+                    stats_tx,
                 );
 
                 torrent.handle().await?;
@@ -266,6 +274,8 @@ async fn main() -> anyhow::Result<()> {
         }
 
         torrent_task.await.context("error in torrent handler")??;
+
+        stats_task.await.context("stats task")??;
 
         Ok::<(), anyhow::Error>(())
     });
