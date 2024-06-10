@@ -270,10 +270,10 @@ async fn main() -> anyhow::Result<()> {
         drop(peer_event_tx);
 
         for handle in handles {
-            handle.await.context("error in peer handler")??;
+            handle.await.context("peer handler task")??;
         }
 
-        torrent_task.await.context("error in torrent handler")??;
+        torrent_task.await.context("torrent task")??;
 
         stats_task.await.context("stats task")??;
 
