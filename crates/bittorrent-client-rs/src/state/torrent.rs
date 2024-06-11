@@ -280,7 +280,7 @@ impl<'a> Torrent<'a> {
             TorrentMode::SingleFile(file_info) => {
                 // TODO: opening a file each time seems wasteful.
                 // Can I buffer say 5 pieces and then write them together to the file?
-                write_to_file(&file_info.path, Into::<u64>::into(index), &piece).await?;
+                write_to_file(&file_info.path, Into::<u64>::into(index) * self.piece_length, &piece).await?;
             }
             TorrentMode::MultiFile(file_infos) => {
                 let global_piece_offset = Into::<u64>::into(index) * self.piece_length;
