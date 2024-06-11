@@ -44,7 +44,7 @@ fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
 // TODO: torrents can stall if a piece had failed the checksum check and we try to get it from the same peer over and
 // over, receiving the same bad piece
 
-// TODO: download speed is slow (~0.7 MiB using 1 GiB ethernet). How can I make it at least 5-10 times faster?
+// TODO: download speed is slow (~10-20 MiB using 1 Gb ethernet). How can I make it at least 5 times faster?
 
 // TODO: global code refactoring/restructuring
 

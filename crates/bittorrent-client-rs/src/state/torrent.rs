@@ -357,7 +357,7 @@ impl<'a> Torrent<'a> {
             .send(SystemEvent::NewPieceAdded(index))
             .map_err(|_| Error::InternalError("Failed to send a system event"))?;
 
-        tracing::debug!("added new piece");
+        tracing::trace!("added new piece");
 
         Ok(())
     }
