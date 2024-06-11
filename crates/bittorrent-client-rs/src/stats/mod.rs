@@ -66,7 +66,7 @@ impl StatsSharedState {
     fn new(downloaded: usize, left: usize) -> Self {
         StatsSharedState {
             prev_piece_download_time: SystemTime::now(),
-            speed_stats: CircularBuffer::new(10),
+            speed_stats: CircularBuffer::new(30),
             number_of_peers: 0,
             download_progress: (downloaded, left),
         }
