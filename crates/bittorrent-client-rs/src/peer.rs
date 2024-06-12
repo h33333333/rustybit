@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::net::Ipv4Addr;
+use std::time::Duration;
 use std::{sync::Arc, time::SystemTime};
 
 use anyhow::Context;
@@ -105,14 +106,30 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin + std::fmt::Debug> Peer<S> {
         (peer, tx)
     }
 
-    #[tracing::instrument(err, skip(self), fields(peer_ip = %self.peer_ip, client_state = ?[self.client_interested, self.client_choked, self.peer_interested, self.peer_choked]))]
+    #[tracing::instrument(err, level = "error", skip(self), fields(peer_ip = %self.peer_ip, client_state = ?[self.client_interested, self.client_choked, self.peer_interested, self.peer_choked]))]
     pub async fn handle(&mut self) -> anyhow::Result<()> {
         // handle handshake
-        let data_length = self.stream.find_handshake_length().await?;
+        let data_length = match tokio::time::timeout(Duration::from_secs(5), self.stream.find_handshake_length()).await
+        {
+            Ok(ok) => ok?,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Peer handshake timeout, peer exiting"
+                );
+
+                self.tx
+                    .send((self.peer_ip, PeerEvent::Disconnected))
+                    .context("Error while sending a Disconnected peer event")?;
+
+                return Ok(());
+            }
+        };
+
         let Some(data) = self.stream.read_bytes(data_length) else {
             anyhow::bail!("bug: missing handshake bytes?");
         };
-        // TODO: should I use some field from it?
+        // TODO: should I use some fields from it?
         let _handshake = Handshake::decode(data)?;
 
         let mut output_frame = Vec::new();
@@ -228,6 +245,7 @@ impl<S: AsyncReadExt + AsyncWriteExt + Unpin + std::fmt::Debug> Peer<S> {
         // Send all queued messages (if any)
         self.stream.flush_to_stream(&output_frame).await?;
 
+        tracing::trace!("peer exited!");
         Ok(())
     }
 

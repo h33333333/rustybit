@@ -104,7 +104,6 @@ impl TorrentSharedState {
         Ok(TorrentSharedState {
             last_piece_idx,
             downloaded_pieces: bitvec![0; number_of_pieces],
-            // TODO: how to fill a piece queue?
             piece_queue: (0..=last_piece_idx).collect(),
             failed_pieces: Vec::new(),
         })
@@ -235,7 +234,13 @@ impl<'a> Torrent<'a> {
                             PeerEvent::Disconnected => {
                                 self.peer_channels.remove(&peer_ip);
                                 if self.peer_channels.is_empty() {
-                                    todo!("Last peer disconnected, shutdown")
+                                    tracing::info!("Finished downloading the torrent, exiting");
+
+                                    if !self.shared_state.read().await.finished_downloading() {
+                                        anyhow::bail!("All peers exited before finishing the torrent, the download is incomplete");
+                                    }
+
+                                    break;
                                 }
                             }
                         };
@@ -250,6 +255,8 @@ impl<'a> Torrent<'a> {
                 }
             }
         }
+
+        Ok(())
     }
 
     /// Adds a new piece with the provided index.
