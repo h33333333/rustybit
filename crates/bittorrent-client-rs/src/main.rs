@@ -48,10 +48,9 @@ fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
 
 // TODO: global code refactoring/restructuring
 
-// TODO: improve shutdown mechanisms
-
-// BUG: for some reason debian download errors randomly and the downloaded bytes are not being
-// saved to the disk
+// TODO: split peer reader and writer into two parallel tasks
+// TODO: rethink how all buffers work (allocations, etc.)
+// TODO: fix the speed estimator
 
 #[tokio::main]
 #[tracing::instrument(err)]
