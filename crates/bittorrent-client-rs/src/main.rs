@@ -138,7 +138,7 @@ async fn main() -> anyhow::Result<()> {
 
         let (peer_event_tx, peer_event_rx) = unbounded_channel();
         // TODO: capacity
-        let (broadcast_tx, _) = broadcast::channel(30);
+        let (broadcast_tx, _) = broadcast::channel(200);
 
         let (new_peer_tx, new_peer_rx) = unbounded_channel();
 
