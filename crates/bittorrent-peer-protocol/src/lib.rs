@@ -4,7 +4,7 @@ mod error;
 mod messages;
 
 pub use error::Error;
-pub use messages::{BittorrentP2pMessage, Handshake, MessageId};
+pub use messages::{BittorrentP2pMessage, Block, BlockRequest, Handshake, MessageId};
 use std::future::Future;
 use tokio::io::AsyncWriteExt;
 

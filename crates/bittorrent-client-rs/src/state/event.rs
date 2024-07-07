@@ -1,3 +1,5 @@
+use bittorrent_peer_protocol::Block;
+
 #[derive(Clone, Debug)]
 pub enum SystemEvent {
     /// Contains corresponding piece index
@@ -5,13 +7,10 @@ pub enum SystemEvent {
     /// Event indicates that peers that didn't have anything to offer previously now can be used to
     /// retry downloading a failed piece if they have it
     PieceFailed(u32),
-    /// All pieces were downloaded
-    DownloadFinished,
 }
 
 pub enum PeerEvent {
-    /// Contains piece index and data
-    PieceDownloaded(u32, Vec<u8>),
+    BlockDownloaded(Block),
     /// Is sent when the download is fully finished or a peer encountered an error
     Disconnected,
 }

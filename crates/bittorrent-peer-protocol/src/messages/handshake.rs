@@ -1,8 +1,5 @@
 use bytes::Buf;
-use std::{
-    borrow::Cow,
-    io::{Cursor, Read},
-};
+use std::{borrow::Cow, io::Cursor};
 use tokio::io::AsyncWriteExt;
 
 use crate::{Decode, Encode, Result};
@@ -19,11 +16,21 @@ pub struct Handshake<'a> {
     pub info_hash: [u8; 20],
     /// 20-byte unique ID for the client. This is usually the same peer ID that was sent in the
     /// tracket request.
-    pub peer_id: Cow<'a, [u8]>,
+    pub peer_id: [u8; 20],
 }
 
 impl<'a> Handshake<'a> {
     pub const FIXED_PART_LENGTH: usize = 1 + 20 + 20 + 8;
+    const DEFAULT_PSTR: &'static str = "BitTorrent protocol";
+
+    pub fn new(info_hash: [u8; 20], peer_id: [u8; 20]) -> Self {
+        Handshake {
+            pstr: Cow::Borrowed(Handshake::DEFAULT_PSTR),
+            extension_bytes: 0,
+            info_hash,
+            peer_id,
+        }
+    }
 }
 
 impl<'a> Encode for Handshake<'a> {
@@ -51,24 +58,27 @@ impl<'a> Decode<'a> for Handshake<'a> {
         let mut src = Cursor::new(src);
 
         let pstr_len = src.get_u8() as usize;
-        let mut pstr_buf = vec![0; pstr_len];
-        src.copy_to_slice(&mut pstr_buf);
-        let pstr = String::from_utf8(pstr_buf)?;
+        let pstr_bytes = {
+            let offset = src.position() as usize;
+            let bytes = &src.get_ref()[offset..offset + pstr_len];
+            src.set_position((offset + pstr_len) as u64);
+            bytes
+        };
+        let pstr = String::from_utf8_lossy(pstr_bytes);
 
         let extension_bytes = src.get_u64();
 
         let mut info_hash = [0; 20];
         src.copy_to_slice(info_hash.as_mut());
 
-        let mut peer_id = Vec::with_capacity(20);
+        let mut peer_id = [0; 20];
         src.copy_to_slice(peer_id.as_mut());
-        src.read_to_end(&mut peer_id)?;
 
         Ok(Handshake {
-            pstr: Cow::Owned(pstr),
+            pstr,
             extension_bytes,
             info_hash,
-            peer_id: Cow::Owned(peer_id),
+            peer_id,
         })
     }
 }

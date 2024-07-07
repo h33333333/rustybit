@@ -40,6 +40,30 @@ impl TryFrom<u8> for MessageId {
     }
 }
 
+/// The request message is fixed length, and is used to request a block. The payload contains the following information:
+///
+/// index: integer specifying the zero-based piece index
+/// begin: integer specifying the zero-based byte offset within the piece
+/// length: integer specifying the requested length.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockRequest {
+    pub index: u32,
+    pub begin: u32,
+    pub length: u32,
+}
+
+/// A single block of data
+///
+/// index: integer specifying the zero-based piece index
+/// begin: integer specifying the zero-based byte offset within the piece
+/// block: block of data, which is a subset of the piece specified by index.
+#[derive(Debug, PartialEq)]
+pub struct Block {
+    pub index: u32,
+    pub begin: u32,
+    pub block: Bytes,
+}
+
 /// Represents all possible `Peer Wire Protocol` messages
 /// [Source](https://wiki.theory.org/BitTorrentSpecification#request:_.3Clen.3D0013.3E.3Cid.3D6.3E.3Cindex.3E.3Cbegin.3E.3Clength.3E)
 #[derive(Debug, PartialEq)]
@@ -70,26 +94,8 @@ pub enum BittorrentP2pMessage {
     /// Bits that are cleared indicated a missing piece, and set bits indicate a valid and available piece.
     /// Spare bits at the end are set to zero.
     Bitfield(BitVec<u8, Msb0>),
-    /// The request message is fixed length, and is used to request a block. The payload contains the following information:
-    ///
-    /// index: integer specifying the zero-based piece index
-    /// begin: integer specifying the zero-based byte offset within the piece
-    /// length: integer specifying the requested length.
-    Request {
-        index: u32,
-        begin: u32,
-        length: u32,
-    },
-    /// A single block of data
-    ///
-    /// index: integer specifying the zero-based piece index
-    /// begin: integer specifying the zero-based byte offset within the piece
-    /// block: block of data, which is a subset of the piece specified by index.
-    Piece {
-        index: u32,
-        begin: u32,
-        block: Bytes,
-    },
+    Request(BlockRequest),
+    Piece(Block),
     /// The cancel message is used to cancel block requests. The payload is identical to that of the [BittorrentP2pMessage::Request] message.
     Cancel {
         index: u32,
@@ -139,7 +145,7 @@ impl BittorrentP2pMessage {
             Have(_) => 5,
             Bitfield(bitvec) => 1 + bitvec.len(),
             Request { .. } | Cancel { .. } => 13,
-            Piece { block, .. } => 9 + block.len(),
+            Piece(Block { block, .. }) => 9 + block.len(),
             Port(_) => 3,
         };
 
@@ -177,12 +183,12 @@ impl Encode for BittorrentP2pMessage {
             Bitfield(bitfield) => {
                 dst.write_all(bitfield.as_raw_slice()).await?;
             }
-            Request { index, begin, length } => {
+            Request(BlockRequest { index, begin, length }) => {
                 dst.write_all(&index.to_be_bytes()).await?;
                 dst.write_all(&begin.to_be_bytes()).await?;
                 dst.write_all(&length.to_be_bytes()).await?;
             }
-            Piece { index, begin, block } => {
+            Piece(Block { index, begin, block }) => {
                 dst.write_all(&index.to_be_bytes()).await?;
                 dst.write_all(&begin.to_be_bytes()).await?;
                 dst.write_all(block).await?;
@@ -232,17 +238,17 @@ impl<'a> Decode<'a> for BittorrentP2pMessage {
                 src.copy_to_slice(&mut raw_bitfield);
                 Self::Bitfield(BitVec::from_vec(raw_bitfield))
             }
-            MessageId::Request => Self::Request {
+            MessageId::Request => Self::Request(BlockRequest {
                 index: src.get_u32(),
                 begin: src.get_u32(),
                 length: src.get_u32(),
-            },
+            }),
             MessageId::Piece => {
                 let index = src.get_u32();
                 let begin = src.get_u32();
                 let block_length = length - 1 /* message id */ - std::mem::size_of::<u32>() * 2 /* index + begin */;
                 let block = src.copy_to_bytes(block_length);
-                Self::Piece { index, begin, block }
+                Self::Piece(Block { index, begin, block })
             }
             MessageId::Cancel => Self::Cancel {
                 index: src.get_u32(),
