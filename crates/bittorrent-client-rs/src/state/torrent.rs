@@ -1,23 +1,23 @@
 use std::collections::HashMap;
 use std::net::SocketAddrV4;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use crate::stats::{DOWNLOADED_BYTES, NUMBER_OF_PEERS};
 use anyhow::Context;
 use bittorrent_peer_protocol::Block;
 use bitvec::bitvec;
 use bitvec::order::Msb0;
 use bitvec::{slice::BitSlice, vec::BitVec};
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use tokio::sync::{broadcast, oneshot, RwLock};
+use tokio::sync::mpsc::{self, UnboundedReceiver};
+use tokio::sync::{oneshot, RwLock};
 
-use crate::stats::StatsEntry;
 use crate::storage::StorageOp;
 use crate::torrent_meta::TorrentMeta;
 use crate::util::piece_size_from_idx;
 use crate::Result;
 
 use super::event::PeerEvent;
-use super::event::SystemEvent;
 
 /// State that each peer keeps a reference to
 #[derive(Debug)]
@@ -89,12 +89,8 @@ pub struct Torrent {
     peer_cancellation_txs: HashMap<SocketAddrV4, oneshot::Sender<()>>,
     /// Channel for receiving peer-level events from peers
     rx: UnboundedReceiver<(SocketAddrV4, PeerEvent)>,
-    /// Channel for sending system-wide events to the peers
-    tx: broadcast::Sender<SystemEvent>,
     /// Channel for receiving cancellation channels for new peers
     peer_cancel_rx: UnboundedReceiver<(SocketAddrV4, oneshot::Sender<()>)>,
-    /// Channel for sending statistics to the corresponding task
-    stats_tx: UnboundedSender<StatsEntry>,
     /// Channel for communicating with the storage backend
     storage_tx: mpsc::Sender<StorageOp>,
     /// Channel for receiving the result of checking piece hashes and storage-related errors
@@ -107,9 +103,7 @@ impl Torrent {
         state: Arc<RwLock<TorrentSharedState>>,
         piece_hashes: Vec<[u8; 20]>,
         rx: UnboundedReceiver<(SocketAddrV4, PeerEvent)>,
-        tx: broadcast::Sender<SystemEvent>,
         peer_cancel_rx: UnboundedReceiver<(SocketAddrV4, oneshot::Sender<()>)>,
-        stats_tx: UnboundedSender<StatsEntry>,
         storage_tx: mpsc::Sender<StorageOp>,
         storage_rx: mpsc::Receiver<(SocketAddrV4, u32, bool)>,
     ) -> Self {
@@ -120,9 +114,7 @@ impl Torrent {
             peer_cancellation_txs: HashMap::new(),
             piece_hashes,
             rx,
-            tx,
             peer_cancel_rx,
-            stats_tx,
             storage_tx,
             storage_rx,
         }
@@ -139,6 +131,7 @@ impl Torrent {
                                 self.add_block(peer_addr, block).await?;
                             }
                             PeerEvent::Disconnected => {
+                                NUMBER_OF_PEERS.fetch_sub(1, Ordering::Relaxed);
                                 // Drop peer cancellation tx
                                 self.get_peer_cancellation_tx(&peer_addr);
 
@@ -158,14 +151,12 @@ impl Torrent {
                         anyhow::bail!("bug: storage backend exited before torrent manager?");
                     };
 
-
                     if !is_correct {
                         tracing::error!(
                             %peer_addr,
                             %piece_idx,
                             "piece hash verification failed: disconnecting the peer"
                         );
-
 
                         // Reset download progress for the failed piece
                         self.piece_download_progress.insert(piece_idx, 0);
@@ -185,6 +176,13 @@ impl Torrent {
                         shared_state.remove_piece_from_in_flight(try_into!(piece_idx, usize)?);
                         shared_state.add_downloaded_piece(try_into!(piece_idx, usize)?);
 
+                        let downloaded_bytes = self
+                            .piece_download_progress
+                            .get(&piece_idx)
+                            .expect("bug: downloaded a piece but didn't track its bytes?");
+
+                        DOWNLOADED_BYTES.fetch_add(*downloaded_bytes, Ordering::Relaxed);
+
                         if shared_state.finished_downloading() {
                             tracing::debug!("all pieces were downloaded; shutting down peers");
                             self.peer_cancellation_txs.drain().for_each(|(peer_addr, cancel_tx)| {
@@ -201,6 +199,7 @@ impl Torrent {
                 },
                 result = self.peer_cancel_rx.recv() => {
                     if let Some((peer_addr, peer_tx_channel)) = result {
+                        NUMBER_OF_PEERS.fetch_add(1, Ordering::Relaxed);
                         self.peer_cancellation_txs.insert(peer_addr, peer_tx_channel);
                     };
                 }

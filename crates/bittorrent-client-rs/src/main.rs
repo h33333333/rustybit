@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context};
 use bittorrent_client_rs::logging::setup_logger;
-use bittorrent_client_rs::stats::stats;
+use bittorrent_client_rs::stats::Stats;
 use bittorrent_client_rs::tracker::TrackerRequest;
 use bittorrent_client_rs::util::generate_peer_id;
 use bittorrent_client_rs::{args, handle_peer, parser, torrent_meta::TorrentMeta, tracker, try_into, StorageManager};
@@ -12,7 +12,8 @@ use bittorrent_client_rs::{Error, Result};
 use bittorrent_client_rs::{Torrent, TorrentSharedState};
 use clap::Parser;
 use tokio::sync::mpsc::{self, unbounded_channel};
-use tokio::sync::{broadcast, oneshot, RwLock};
+use tokio::sync::{oneshot, RwLock};
+use tokio::task::JoinSet;
 use url::Url;
 
 fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
@@ -34,8 +35,8 @@ fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
     Ok(url)
 }
 
-// TODO: use exponential moving average to estimate speed and download time
-// FIXME: stats printer
+// TODO: piece stealing from slow peers
+// FIXME: there is some weird bug that doesn't allow stats estimator to go below 1.5 MiBps
 
 // TODO: global code refactoring/restructuring
 
@@ -108,16 +109,15 @@ async fn main() -> anyhow::Result<()> {
         let torrent_state = Arc::new(RwLock::new(TorrentSharedState::new(pieces_total)?));
 
         let (peer_event_tx, peer_event_rx) = unbounded_channel();
-        // TODO: capacity
-        let (broadcast_tx, _) = broadcast::channel(200);
 
         let (new_peer_tx, new_peer_rx) = unbounded_channel();
 
-        let (stats_tx, stats_rx) = tokio::sync::mpsc::unbounded_channel();
-        let stats_task = tokio::spawn(async move {
+        let (stats_cancel_tx, stats_cancel_rx) = oneshot::channel();
+        let stats_task = {
             let length = try_into!(length, usize).context("starting a stats task")?;
-            stats(0, length, length, stats_rx).await
-        });
+            let mut stats = Stats::new(0, length, length);
+            tokio::spawn(async move { stats.collect_stats(stats_cancel_rx).await })
+        };
 
         let torrent_meta = TorrentMeta::new(
             info_hash,
@@ -147,7 +147,6 @@ async fn main() -> anyhow::Result<()> {
                 tokio::spawn(async move { storage_manager.listen_for_blocks(storage_rx, hash_check_tx).await });
 
             let torrent_state = torrent_state.clone();
-            let broadcast_tx = broadcast_tx.clone();
 
             let torrent_meta = torrent_meta.clone();
             let torrent_handle = tokio::spawn(async move {
@@ -165,9 +164,7 @@ async fn main() -> anyhow::Result<()> {
                     torrent_state,
                     splitted_piece_hashes?,
                     peer_event_rx,
-                    broadcast_tx,
                     new_peer_rx,
-                    stats_tx,
                     storage_tx,
                     hash_check_rx,
                 );
@@ -180,46 +177,46 @@ async fn main() -> anyhow::Result<()> {
             (torrent_handle, storage_handle)
         };
 
-        let mut handles_with_cancel = Vec::with_capacity(peers.len());
+        let mut peer_connection_tasks = JoinSet::new();
         for peer_address in peers.into_iter() {
-            let peer_broadcast_rx = broadcast_tx.subscribe();
             let peer_state = torrent_state.clone();
             let peer_event_tx = peer_event_tx.clone();
-            let (cancellation_tx, cancellation_rx) = oneshot::channel();
 
-            let task_handle = tokio::spawn(handle_peer(
+            peer_connection_tasks.spawn(handle_peer(
                 peer_address,
                 torrent_meta.clone(),
                 peer_id,
                 peer_state,
-                peer_broadcast_rx,
                 peer_event_tx,
-                cancellation_rx,
             ));
-
-            handles_with_cancel.push((task_handle, cancellation_tx, peer_address));
         }
 
         drop(peer_event_tx);
 
-        for (handle, cancellation_tx, peer_addr) in handles_with_cancel {
-            let connection_result = handle.await.context("peer connection task")?;
-            if let Ok(peer_handler_task) = connection_result {
+        let mut peer_handler_tasks = Vec::with_capacity(peer_connection_tasks.len());
+        while let Some(connection_result) = peer_connection_tasks.join_next().await {
+            if let Ok(Ok((peer_addr, cancellation_tx, peer_handler_task))) = connection_result {
                 if new_peer_tx.send((peer_addr, cancellation_tx)).is_ok() {
-                    peer_handler_task.await.context("peer handler task")??;
+                    peer_handler_tasks.push(peer_handler_task);
                 };
-            } else {
-                tracing::trace!(%peer_addr, "Peer connection failed: {}", connection_result.unwrap_err());
             }
         }
 
         drop(new_peer_tx);
 
+        for task in peer_handler_tasks {
+            task.await?.context("peer handler task")?;
+        }
+
         torrent_task.await.context("torrent task")??;
 
         storage_task.await.context("storage task")??;
 
-        stats_task.await.context("stats task")??;
+        stats_cancel_tx
+            .send(())
+            .map_err(|_| anyhow::anyhow!("bug: stats collector exited before cancellation?"))?;
+
+        stats_task.await.context("stats task")?;
 
         Ok::<(), anyhow::Error>(())
     });

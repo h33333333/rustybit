@@ -26,6 +26,10 @@ impl<T> CircularBuffer<T> {
 
         self.pos += 1;
     }
+
+    pub fn get_last(&self) -> Option<&T> {
+        self.get(self.pos - 1)
+    }
 }
 
 impl<T> Deref for CircularBuffer<T> {
