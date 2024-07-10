@@ -14,7 +14,7 @@ impl<T> CircularBuffer<T> {
     }
 
     pub fn push_back(&mut self, item: T) {
-        if self.pos == self.inner.capacity() - 1 {
+        if self.pos == self.inner.capacity() {
             self.pos = 0
         }
 
