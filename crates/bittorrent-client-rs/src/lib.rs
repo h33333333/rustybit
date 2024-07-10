@@ -67,10 +67,10 @@ where
     where
         Self: Future<Output = T>,
     {
-        let start = std::time::SystemTime::now();
+        let start = std::time::Instant::now();
         let result = self.await;
 
-        let elapsed = start.elapsed().expect("bug: future went back in time?");
+        let elapsed = start.elapsed();
         if expected.is_some_and(|expected| elapsed > expected) {
             // SAFETY: checked above
             tracing::trace!( expected = ?expected.unwrap(), ?elapsed, "'{}' task took more time than expected to execute", name);

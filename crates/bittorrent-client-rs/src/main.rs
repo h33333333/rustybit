@@ -35,10 +35,10 @@ fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
     Ok(url)
 }
 
+// TODO: implement DHT?
 // TODO: piece stealing from slow peers
-// FIXME: there is some weird bug that doesn't allow stats estimator to go below 1.5 MiBps
-
 // TODO: global code refactoring/restructuring
+// TODO: allow continuing torrents if they already were partially downloaded
 
 #[tokio::main]
 #[tracing::instrument(err)]

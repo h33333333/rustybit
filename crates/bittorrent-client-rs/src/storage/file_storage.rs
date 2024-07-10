@@ -26,8 +26,8 @@ impl FileStorage {
                 .open(path)
                 .with_context(|| format!("error while opening/creating a file: {path:?}"))?;
 
-            // f.set_len(*file_len)
-            //     .with_context(|| format!("error while setting the file's length: {path:?}, {file_len}"))?;
+            f.set_len(*file_len)
+                .with_context(|| format!("error while setting the file's length: {path:?}, {file_len}"))?;
 
             files.push(f);
         }
