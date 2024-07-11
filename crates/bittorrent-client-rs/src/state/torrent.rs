@@ -2,35 +2,44 @@ use std::collections::HashMap;
 use std::net::SocketAddrV4;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 
-use crate::stats::{DOWNLOADED_BYTES, NUMBER_OF_PEERS};
 use anyhow::Context;
 use bittorrent_peer_protocol::Block;
-use bitvec::bitvec;
 use bitvec::order::Msb0;
-use bitvec::{slice::BitSlice, vec::BitVec};
+use bitvec::slice::BitSlice;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::sync::{oneshot, RwLock};
 
+use super::event::PeerEvent;
+use crate::stats::{DOWNLOADED_BYTES, NUMBER_OF_PEERS};
 use crate::storage::StorageOp;
 use crate::torrent_meta::TorrentMeta;
 use crate::util::piece_size_from_idx;
 use crate::Result;
 
-use super::event::PeerEvent;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PieceState {
+    Queued,
+    Downloading { peer: SocketAddrV4, start: Instant },
+    Downloaded,
+    Verified,
+}
 
 /// State that each peer keeps a reference to
 #[derive(Debug)]
 pub struct TorrentSharedState {
-    in_flight_pieces: BitVec,
-    downloaded_pieces: BitVec,
+    peer_download_stats: HashMap<SocketAddrV4, (f64, f64)>,
+    pieces: Vec<PieceState>,
+    piece_download_progress: HashMap<u32, usize>,
 }
 
 impl TorrentSharedState {
     pub fn new(number_of_pieces: usize) -> Result<Self> {
         Ok(TorrentSharedState {
-            downloaded_pieces: bitvec![0; number_of_pieces],
-            in_flight_pieces: bitvec![0; number_of_pieces],
+            peer_download_stats: HashMap::new(),
+            pieces: vec![PieceState::Queued; number_of_pieces],
+            piece_download_progress: HashMap::with_capacity(number_of_pieces),
         })
     }
 }
@@ -39,43 +48,85 @@ impl TorrentSharedState {
     /// Returns either a piece that we failed to download earlier or one that we didn't try yet.
     pub fn get_next_missing_piece_indexes(
         &mut self,
+        peer_addr: SocketAddrV4,
         peer_available_pieces: &BitSlice<u8, Msb0>,
         number_of_pieces: usize,
-    ) -> anyhow::Result<Option<Vec<u32>>> {
-        self.downloaded_pieces
+    ) -> anyhow::Result<Option<Vec<(u32, Option<SocketAddrV4>)>>> {
+        let pieces = self
+            .pieces
             .iter_mut()
             .enumerate()
-            .filter_map(|(idx, is_present)| {
-                if !*is_present && !self.in_flight_pieces[idx] && peer_available_pieces[idx] {
-                    // Reserve this piece
-                    self.in_flight_pieces.set(idx, true);
-                    Some(try_into!(idx, u32))
-                } else {
-                    None
+            .filter_map(|(idx, status)| {
+                if !peer_available_pieces[idx] {
+                    return None;
+                }
+                match status {
+                    PieceState::Queued => {
+                        *status = PieceState::Downloading {
+                            peer: peer_addr,
+                            start: Instant::now(),
+                        };
+                        Some(try_into!(idx, u32).map(|idx| (idx, None)))
+                    }
+                    PieceState::Downloading { peer, start } => {
+                        let peer = *peer;
+                        if peer == peer_addr {
+                            return None;
+                        }
+
+                        let requesting_peer_stats = self.peer_download_stats.entry(peer_addr).or_insert((0., 0.));
+                        if requesting_peer_stats.1 == 0. {
+                            None
+                        // Compare elapsed time to requesting peer's average piece downloading time
+                        } else if start.elapsed().as_secs_f64()
+                            > (requesting_peer_stats.0 / requesting_peer_stats.1) * 10.
+                        {
+                            *status = PieceState::Downloading {
+                                peer: peer_addr,
+                                start: Instant::now(),
+                            };
+                            Some(try_into!(idx, u32).map(|idx| (idx, Some(peer))))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
                 }
             })
             .take(number_of_pieces)
-            .collect::<Result<Vec<u32>>>()
+            .collect::<Result<Vec<(u32, Option<SocketAddrV4>)>>>()
             .context("bug: converting piece index to u32 failed - too many pieces?")
-            .map(|vec| if vec.is_empty() { None } else { Some(vec) })
+            .map(|vec| if vec.is_empty() { None } else { Some(vec) })?;
+
+        if let Some(pieces) = pieces.as_ref() {
+            for (piece_idx, stolen_from) in pieces.iter().filter(|(_, stolen_from)| stolen_from.is_some()) {
+                // TODO: send cancellation requests
+                // Reset piece download progress
+                self.piece_download_progress.insert(*piece_idx, 0);
+            }
+        }
+
+        Ok(pieces)
+    }
+
+    pub fn get_piece_status(&self, idx: usize) -> Option<&PieceState> {
+        self.pieces.get(idx)
     }
 
     /// Checks whether the current torrent was fully downloaded
     pub fn finished_downloading(&self) -> bool {
-        self.downloaded_pieces.all()
+        self.pieces.iter().all(|state| state == &PieceState::Verified)
     }
 
     /// Returns the total number of pieces for the current torrent
     pub fn get_number_of_pieces(&self) -> usize {
-        self.downloaded_pieces.len()
+        self.pieces.len()
     }
 
-    pub fn add_downloaded_piece(&mut self, index: usize) {
-        self.downloaded_pieces.set(index, true);
-    }
-
-    pub fn remove_piece_from_in_flight(&mut self, piece_idx: usize) {
-        self.in_flight_pieces.set(piece_idx, false);
+    pub fn mark_piece_as_verified(&mut self, piece_idx: usize) {
+        if let Some(piece_state) = self.pieces.get_mut(piece_idx) {
+            *piece_state = PieceState::Verified
+        };
     }
 }
 
@@ -128,10 +179,14 @@ impl Torrent {
                     if let Some((peer_addr, event)) = result {
                         match event {
                             PeerEvent::BlockDownloaded(block) => {
-                                self.add_block(peer_addr, block).await?;
+                                // We need to own the state all this time to avoid some other peer
+                                // stealing the piece
+                                let mut state = self.shared_state.write().await;
+                                if Torrent::verify_piece_not_stolen(&state, peer_addr, try_into!(block.index, usize)?).await? {
+                                    self.add_block(&mut state, peer_addr, block).await?;
+                                }
                             }
-                            PeerEvent::Disconnected => {
-                                NUMBER_OF_PEERS.fetch_sub(1, Ordering::Relaxed);
+                            PeerEvent::Disconnected => { NUMBER_OF_PEERS.fetch_sub(1, Ordering::Relaxed);
                                 // Drop peer cancellation tx
                                 self.get_peer_cancellation_tx(&peer_addr);
 
@@ -151,6 +206,9 @@ impl Torrent {
                         anyhow::bail!("bug: storage backend exited before torrent manager?");
                     };
 
+                    let mut shared_state = self.shared_state.write().await;
+                    let piece_state = shared_state.pieces.get_mut(try_into!(piece_idx, usize)?).context("bug: downloaded a ghost piece?")?;
+
                     if !is_correct {
                         tracing::error!(
                             %peer_addr,
@@ -158,10 +216,11 @@ impl Torrent {
                             "piece hash verification failed: disconnecting the peer"
                         );
 
+                        *piece_state = PieceState::Queued;
                         // Reset download progress for the failed piece
-                        self.piece_download_progress.insert(piece_idx, 0);
-                        self.shared_state.write().await.remove_piece_from_in_flight(try_into!(piece_idx, usize)?);
+                        shared_state.piece_download_progress.insert(piece_idx, 0);
 
+                        drop(shared_state);
                         if let Some(cancel_tx) = self.get_peer_cancellation_tx(&peer_addr) {
                             if cancel_tx.send(()).is_err() {
                                 tracing::error!(
@@ -171,16 +230,9 @@ impl Torrent {
                             }
                         };
                     } else {
-                        let mut shared_state = self.shared_state.write().await;
+                        *piece_state = PieceState::Verified;
 
-                        shared_state.remove_piece_from_in_flight(try_into!(piece_idx, usize)?);
-                        shared_state.add_downloaded_piece(try_into!(piece_idx, usize)?);
-
-                        let downloaded_bytes = self
-                            .piece_download_progress
-                            .get(&piece_idx)
-                            .expect("bug: downloaded a piece but didn't track its bytes?");
-
+                        let downloaded_bytes = shared_state.piece_download_progress.get(&piece_idx).context("bug: downloaded a piece but didn't track its bytes?")?;
                         DOWNLOADED_BYTES.fetch_add(*downloaded_bytes, Ordering::Relaxed);
 
                         if shared_state.finished_downloading() {
@@ -210,8 +262,13 @@ impl Torrent {
     }
 
     #[tracing::instrument(err, skip(self, begin, block))]
-    async fn add_block(&mut self, peer_addr: SocketAddrV4, Block { index, begin, block }: Block) -> anyhow::Result<()> {
-        let downloaded_bytes = self.piece_download_progress.entry(index).or_insert(0);
+    async fn add_block(
+        &self,
+        state: &mut TorrentSharedState,
+        peer_addr: SocketAddrV4,
+        Block { index, begin, block }: Block,
+    ) -> anyhow::Result<()> {
+        let downloaded_bytes = state.piece_download_progress.entry(index).or_insert(0);
 
         let expected_piece_size = piece_size_from_idx(
             self.torrent_meta.number_of_pieces,
@@ -244,13 +301,33 @@ impl Torrent {
             })?;
 
         if *downloaded_bytes == expected_piece_size {
-            let Some(expected_piece_hash) = self.get_piece_hash(try_into!(index, usize)?) else {
+            let piece_idx = try_into!(index, usize)?;
+            let Some(expected_piece_hash) = self.get_piece_hash(piece_idx) else {
                 anyhow::bail!(format!(
                     "Wrong piece index: index {}, total pieces: {}",
-                    index,
+                    piece_idx,
                     self.shared_state.read().await.get_number_of_pieces()
                 ));
             };
+
+            let piece_state = state
+                .pieces
+                .get_mut(piece_idx)
+                .with_context(|| format!("bug: missing piece state for piece #{}", piece_idx))?;
+
+            let PieceState::Downloading { start, .. } = piece_state else {
+                anyhow::bail!("bug: how did we even get here?");
+            };
+
+            // Update peer download stats
+            let elapsed_secs = start.elapsed().as_secs_f64();
+            let (ref mut peer_piece_download_times_sum, ref mut peer_downloaded_pieces) =
+                state.peer_download_stats.entry(peer_addr).or_insert((0., 0.));
+            *peer_piece_download_times_sum += elapsed_secs;
+            *peer_downloaded_pieces += 1.;
+
+            // Mark piece as downloaded
+            *piece_state = PieceState::Downloaded;
 
             self.storage_tx
                 .send(StorageOp::CheckPieceHash((
@@ -276,5 +353,17 @@ impl Torrent {
 
     fn get_piece_hash(&self, index: usize) -> Option<&[u8; 20]> {
         self.piece_hashes.get(index)
+    }
+
+    async fn verify_piece_not_stolen(
+        state: &TorrentSharedState,
+        peer_addr: SocketAddrV4,
+        piece_idx: usize,
+    ) -> anyhow::Result<bool> {
+        let piece_status = state.get_piece_status(piece_idx).context("bug: bad piece index?")?;
+        match piece_status {
+            PieceState::Downloading { peer, .. } if *peer == peer_addr => Ok(true),
+            _ => Ok(false),
+        }
     }
 }

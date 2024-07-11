@@ -1,3 +1,4 @@
+use crate::state::torrent::PieceState;
 use crate::torrent_meta::TorrentMeta;
 use crate::util::piece_size_from_idx;
 use crate::{Elapsed, TorrentSharedState, WithTimeout, DEFAULT_BLOCK_SIZE};
@@ -54,7 +55,7 @@ pub async fn handle_peer(
     keep_alive_interval.tick().await;
 
     let mut output = Vec::with_capacity(metadata.piece_size * 2);
-    let mut handler = PeerHandler::new(state, metadata);
+    let mut handler = PeerHandler::new(state, metadata, peer_addr);
 
     let (cancellation_tx, mut cancellation_rx) = sync::oneshot::channel();
 
@@ -101,13 +102,17 @@ pub async fn handle_peer(
                             .write()
                             .await
                             // SAFETY: checked above
-                            .get_next_missing_piece_indexes(handler.present_pieces.as_ref().unwrap(), number_of_pieces)
+                            .get_next_missing_piece_indexes(
+                                handler.peer_addr,
+                                handler.present_pieces.as_ref().unwrap(),
+                                number_of_pieces,
+                            )
                             .context("bug: getting next pieces failed?")?;
                         if let Some(piece_indexes) = next_pieces {
                             // We found a new piece that can be downloaded from this peer
                             // TODO: if next_piece len is lower than requested -> set a flag that we
                             // shouldn't try to get any more pieces to avoid unncecessary locks
-                            for index in piece_indexes.into_iter() {
+                            for (index, ..) in piece_indexes.into_iter() {
                                 handler
                                     .add_block_requests_for_piece(index)
                                     .with_context(|| format!("adding block requests for piece: {}", index))?;
@@ -140,6 +145,7 @@ pub async fn handle_peer(
 }
 
 struct PeerHandler {
+    peer_addr: SocketAddrV4,
     state: Arc<RwLock<TorrentSharedState>>,
     /// Contains all torrent-related information that a peer handler may need
     torrent_metadata: TorrentMeta,
@@ -164,8 +170,9 @@ struct PeerHandler {
 impl PeerHandler {
     const MAX_PENDING_BLOCK_REQUESTS: usize = 20;
 
-    pub fn new(state: Arc<RwLock<TorrentSharedState>>, torrent_metadata: TorrentMeta) -> Self {
+    pub fn new(state: Arc<RwLock<TorrentSharedState>>, torrent_metadata: TorrentMeta, peer_addr: SocketAddrV4) -> Self {
         PeerHandler {
+            peer_addr,
             state,
             // TODO: this should depend on a number of blocks in a single piece
             block_requests_queue: VecDeque::with_capacity(10),
@@ -231,15 +238,28 @@ impl PeerHandler {
                     .iter()
                     .position(|req| req.index == index && req.begin == begin)
                 else {
-                    anyhow::bail!(
-                        "unexpected piece index in the received block: {}, requested blocks: {:?}",
-                        index,
-                        &self.sent_block_requests
-                    );
+                    // This piece was stolen earlier
+                    self.cancel_block_requests_for_piece(index, output).await?;
+                    return Ok(None);
                 };
                 self.sent_block_requests.remove(block_request_idx);
 
-                return Ok(Some(PeerEvent::BlockDownloaded(Block { index, begin, block })));
+                let state = self.state.read().await;
+                let piece = state
+                    .get_piece_status(try_into!(index, usize)?)
+                    .context("bug: unexsisting piece index?")?;
+                match piece {
+                    PieceState::Downloading { peer, .. } if *peer == self.peer_addr => {
+                        return Ok(Some(PeerEvent::BlockDownloaded(Block { index, begin, block })));
+                    }
+                    PieceState::Downloading { .. } | PieceState::Downloaded { .. } | PieceState::Verified => {
+                        // Someone stole the piece, ignoring the received block
+                        drop(state);
+                        self.cancel_block_requests_for_piece(index, output).await?;
+                        return Ok(None);
+                    }
+                    _ => anyhow::bail!("bug: someone put a piece that we were downloading back in the queue?"),
+                }
             }
             Cancel { index, begin, length } => {
                 tracing::trace!(index, begin, length, "received a Cancel message from peer");
@@ -287,6 +307,28 @@ impl PeerHandler {
                 // Nothing left to send
                 break;
             }
+        }
+
+        Ok(())
+    }
+
+    async fn cancel_block_requests_for_piece(&mut self, piece_idx: u32, output: &mut Vec<u8>) -> Result<()> {
+        // Remove queued requests for this piece if any
+        self.block_requests_queue.retain(|block| block.index != piece_idx);
+
+        let requests_to_cancel = self
+            .sent_block_requests
+            .iter()
+            .enumerate()
+            .filter(|(_, block)| block.index == piece_idx)
+            .map(|(idx, _)| idx)
+            .collect::<Vec<usize>>();
+
+        for (offset, index) in requests_to_cancel.iter().enumerate() {
+            let BlockRequest { index, begin, length } = self.sent_block_requests.swap_remove(index - offset);
+            BittorrentP2pMessage::Cancel { index, begin, length }
+                .encode(output)
+                .await?;
         }
 
         Ok(())
