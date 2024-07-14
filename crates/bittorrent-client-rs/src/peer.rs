@@ -12,26 +12,23 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+use tokio::sync::mpsc::{self};
 use tokio::sync::{self, RwLock};
-use tokio::task::JoinHandle;
 use tokio::time;
 
 use crate::buffer::ReadBuf;
 use crate::state::event::{PeerEvent, TorrentManagerReq};
 use crate::Result;
 
-#[tracing::instrument(ret, skip_all, fields(%peer_addr))]
+#[tracing::instrument(err, skip_all, fields(%peer_addr))]
 pub async fn handle_peer(
     peer_addr: SocketAddrV4,
     metadata: TorrentMeta,
     client_peer_id: [u8; 20],
     state: Arc<RwLock<TorrentSharedState>>,
-    tx: sync::mpsc::UnboundedSender<(SocketAddrV4, PeerEvent)>,
-) -> anyhow::Result<(
-    SocketAddrV4,
-    sync::mpsc::Sender<TorrentManagerReq>,
-    JoinHandle<anyhow::Result<()>>,
-)> {
+    tx: mpsc::UnboundedSender<(SocketAddrV4, PeerEvent)>,
+    new_peer_req_tx: mpsc::UnboundedSender<(SocketAddrV4, mpsc::Sender<TorrentManagerReq>)>,
+) -> anyhow::Result<()> {
     let mut stream = TcpStream::connect(peer_addr)
         .with_timeout("peer connect", Duration::from_secs(5))
         .await
@@ -62,79 +59,90 @@ pub async fn handle_peer(
     let mut handler = PeerHandler::new(state, metadata, peer_addr);
 
     let (manager_req_tx, mut manager_req_rx) = sync::mpsc::channel(10);
+    new_peer_req_tx
+        .send((peer_addr, manager_req_tx))
+        .context("error while registering a new peer with the manager")?;
 
     tracing::trace!("handshakes done, starting a peer handling task");
-    Ok((
-        peer_addr,
-        manager_req_tx,
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    message = read_buf.read_message(&mut stream).with_elapsed("read_message", Some(Duration::from_millis(100))) => {
-                        let message = message.context("reading message")?;
-                        if let Some(event) = handler
-                            .handle_message(message, &mut output)
-                            .with_elapsed("handle_message", Some(Duration::from_millis(50)))
-                            .await?
-                        {
-                            tx.send((peer_addr, event)).context("sending a peer event")?;
-                        };
-                    }
-                    req = manager_req_rx.recv() => {
-                        match req.context("bug: manager dropped the event-sending half?")? {
-                            TorrentManagerReq::CancelPiece(piece_idx) => {
-                                handler.cancel_block_requests_for_piece(piece_idx, &mut output).await.context("cancelling block requests for stolen piece")?;
-                            }
-                            TorrentManagerReq::Disconnect(reason) => {
-                                tracing::trace!(%reason, "cancellation requested, peer exiting");
-                                break;
-                            }
-                        }
-                    }
-                    _ = time::sleep(Duration::from_secs(2)) => {}
-                    _ = keep_alive_interval.tick() => {
-                        // It's time to send a Keep Alive message
-                        handler.send_keep_alive(&mut output).await?;
-                    }
-                }
 
-                if !handler.peer_choked
-                    && handler.present_pieces.is_some()
-                    && handler.block_requests_queue.len() < PeerHandler::MAX_PENDING_BLOCK_REQUESTS
-                {
-                    let need_blocks = PeerHandler::MAX_PENDING_BLOCK_REQUESTS - handler.block_requests_queue.len();
-                    let number_of_pieces = need_blocks * 3 / handler.get_blocks_per_piece() + 1;
-                    let next_pieces = handler
-                        .state
-                        .write()
-                        .await
-                        // SAFETY: checked above
-                        .get_next_missing_piece_indexes(
-                            handler.peer_addr,
-                            handler.present_pieces.as_ref().unwrap(),
-                            number_of_pieces,
-                        )
-                        .context("bug: getting next pieces failed?")?;
-                    if let Some(piece_indexes) = next_pieces {
-                        // We found new pieces that can be downloaded from this peer
-                        for (index, ..) in piece_indexes.into_iter() {
-                            handler
-                                .add_block_requests_for_piece(index)
-                                .with_context(|| format!("adding block requests for piece: {}", index))?;
+    let clonex_tx = tx.clone();
+    let task_handle = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                message = read_buf.read_message(&mut stream).with_elapsed("read_message", Some(Duration::from_millis(100))) => {
+                    let message = message.context("reading message")?;
+                    if let Some(event) = handler
+                        .handle_message(message, &mut output)
+                        .with_elapsed("handle_message", Some(Duration::from_millis(50)))
+                        .await?
+                    {
+                        clonex_tx.send((peer_addr, event)).context("sending a peer event")?;
+                    };
+                }
+                req = manager_req_rx.recv() => {
+                    match req.context("bug: manager dropped the event-sending half?")? {
+                        TorrentManagerReq::CancelPiece(piece_idx) => {
+                            handler.cancel_block_requests_for_piece(piece_idx, &mut output).await.context("cancelling block requests for stolen piece")?;
+                        }
+                        TorrentManagerReq::Disconnect(reason) => {
+                            tracing::trace!(%reason, "cancellation requested, peer exiting");
+                            break;
                         }
                     }
                 }
-
-                // Send block requests if we have them and can send
-                handler.send_block_requests(&mut output).await?;
-
-                stream.write_all(&output).await.context("writing to the stream")?;
-                output.clear();
+                _ = time::sleep(Duration::from_secs(2)) => {}
+                _ = keep_alive_interval.tick() => {
+                    // It's time to send a Keep Alive message
+                    handler.send_keep_alive(&mut output).await?;
+                }
             }
 
-            Ok(())
-        }),
-    ))
+            if !handler.peer_choked
+                && handler.present_pieces.is_some()
+                && handler.block_requests_queue.len() < PeerHandler::MAX_PENDING_BLOCK_REQUESTS
+            {
+                let need_blocks = PeerHandler::MAX_PENDING_BLOCK_REQUESTS - handler.block_requests_queue.len();
+                let number_of_pieces = need_blocks * 3 / handler.get_blocks_per_piece() + 1;
+                let next_pieces = handler
+                    .state
+                    .write()
+                    .await
+                    // SAFETY: checked above
+                    .get_next_missing_piece_indexes(
+                        handler.peer_addr,
+                        handler.present_pieces.as_ref().unwrap(),
+                        number_of_pieces,
+                    )
+                    .context("bug: getting next pieces failed?")?;
+                if let Some(piece_indexes) = next_pieces {
+                    // We found new pieces that can be downloaded from this peer
+                    for (index, ..) in piece_indexes.into_iter() {
+                        handler
+                            .add_block_requests_for_piece(index)
+                            .with_context(|| format!("adding block requests for piece: {}", index))?;
+                    }
+                }
+            }
+
+            // Send block requests if we have them and are not choked
+            handler.send_block_requests(&mut output).await?;
+
+            stream.write_all(&output).await.context("writing to the stream")?;
+            output.clear();
+        }
+
+        Ok::<(), anyhow::Error>(())
+    });
+
+    match task_handle.await.context("peer handling task panicked")? {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            tx.send((peer_addr, PeerEvent::Disconnected))
+                .with_context(|| format!("peer graceful shutdown failed. Error that caused shutdown: {:#}", e))?;
+
+            Err(e)
+        }
+    }
 }
 
 struct PeerHandler {
@@ -321,7 +329,7 @@ impl PeerHandler {
             BittorrentP2pMessage::Unchoke.encode(output).await?;
         }
 
-        self.client_interested = client_choked;
+        self.client_choked = client_choked;
 
         Ok(())
     }

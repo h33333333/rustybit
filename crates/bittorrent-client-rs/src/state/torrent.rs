@@ -200,8 +200,8 @@ impl Torrent {
                                     self.add_block(&mut state, peer_addr, block).await?;
                                 }
                             }
-                            PeerEvent::Disconnected(reason) => { NUMBER_OF_PEERS.fetch_sub(1, Ordering::Relaxed);
-                                tracing::debug!(%peer_addr, %reason, "peer exited unexpectedly");
+                            PeerEvent::Disconnected => { NUMBER_OF_PEERS.fetch_sub(1, Ordering::Relaxed);
+                                tracing::debug!(%peer_addr, "peer exited unexpectedly");
                                 // Drop peer cancellation tx
                                 self.remove_peer_req_tx(&peer_addr);
 

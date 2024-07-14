@@ -176,35 +176,28 @@ async fn main() -> anyhow::Result<()> {
             (torrent_handle, storage_handle)
         };
 
-        let mut peer_connection_tasks = JoinSet::new();
+        let mut peer_handler_tasks = JoinSet::new();
         for peer_address in peers.into_iter() {
             let peer_state = torrent_state.clone();
             let peer_event_tx = peer_event_tx.clone();
 
-            peer_connection_tasks.spawn(handle_peer(
+            peer_handler_tasks.spawn(handle_peer(
                 peer_address,
                 torrent_meta.clone(),
                 peer_id,
                 peer_state,
                 peer_event_tx,
+                new_peer_tx.clone(),
             ));
         }
 
+        drop(new_peer_tx);
         drop(peer_event_tx);
 
-        let mut peer_handler_tasks = Vec::with_capacity(peer_connection_tasks.len());
-        while let Some(connection_result) = peer_connection_tasks.join_next().await {
-            if let Ok(Ok((peer_addr, cancellation_tx, peer_handler_task))) = connection_result {
-                if new_peer_tx.send((peer_addr, cancellation_tx)).is_ok() {
-                    peer_handler_tasks.push(peer_handler_task);
-                };
+        while let Some(peer_handler_result) = peer_handler_tasks.join_next().await {
+            if let Err(e) = peer_handler_result.context("peer handler task")? {
+                tracing::error!("an error happened in the peer: {:#}", e);
             }
-        }
-
-        drop(new_peer_tx);
-
-        for task in peer_handler_tasks {
-            task.await?.context("peer handler task")?;
         }
 
         torrent_task.await.context("torrent task")??;
