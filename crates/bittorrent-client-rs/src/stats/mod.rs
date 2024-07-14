@@ -9,6 +9,7 @@ use std::{
 mod buffer;
 
 pub static DOWNLOADED_BYTES: AtomicUsize = AtomicUsize::new(0);
+pub static DOWNLOADED_PIECES: AtomicUsize = AtomicUsize::new(0);
 pub static NUMBER_OF_PEERS: AtomicU8 = AtomicU8::new(0);
 
 struct Snapshot {
@@ -55,8 +56,6 @@ impl Stats {
             tokio::select! {
                 snapshot_time = stats_collecting_interval.tick() => {
                     self.snapshot(snapshot_time);
-                    // TODO: add EMA for avg speed?
-                    // But what to do with circular buffer?
                     self.print_stats();
                 }
                 _ = &mut cancellation => {

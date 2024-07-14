@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 use tokio::time;
 
 use crate::buffer::ReadBuf;
-use crate::state::event::{PeerEvent, SystemEvent};
+use crate::state::event::{PeerEvent, TorrentManagerReq};
 use crate::Result;
 
 #[tracing::instrument(ret, skip_all, fields(%peer_addr))]
@@ -27,7 +27,11 @@ pub async fn handle_peer(
     client_peer_id: [u8; 20],
     state: Arc<RwLock<TorrentSharedState>>,
     tx: sync::mpsc::UnboundedSender<(SocketAddrV4, PeerEvent)>,
-) -> anyhow::Result<(SocketAddrV4, sync::oneshot::Sender<()>, JoinHandle<anyhow::Result<()>>)> {
+) -> anyhow::Result<(
+    SocketAddrV4,
+    sync::mpsc::Sender<TorrentManagerReq>,
+    JoinHandle<anyhow::Result<()>>,
+)> {
     let mut stream = TcpStream::connect(peer_addr)
         .with_timeout("peer connect", Duration::from_secs(5))
         .await
@@ -57,12 +61,12 @@ pub async fn handle_peer(
     let mut output = Vec::with_capacity(metadata.piece_size * 2);
     let mut handler = PeerHandler::new(state, metadata, peer_addr);
 
-    let (cancellation_tx, mut cancellation_rx) = sync::oneshot::channel();
+    let (manager_req_tx, mut manager_req_rx) = sync::mpsc::channel(10);
 
     tracing::trace!("handshakes done, starting a peer handling task");
     Ok((
         peer_addr,
-        cancellation_tx,
+        manager_req_tx,
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -76,59 +80,48 @@ pub async fn handle_peer(
                             tx.send((peer_addr, event)).context("sending a peer event")?;
                         };
                     }
+                    req = manager_req_rx.recv() => {
+                        match req.context("bug: manager dropped the event-sending half?")? {
+                            TorrentManagerReq::CancelPiece(piece_idx) => {
+                                handler.cancel_block_requests_for_piece(piece_idx, &mut output).await.context("cancelling block requests for stolen piece")?;
+                            }
+                            TorrentManagerReq::Disconnect(reason) => {
+                                tracing::trace!(%reason, "cancellation requested, peer exiting");
+                                break;
+                            }
+                        }
+                    }
+                    _ = time::sleep(Duration::from_secs(2)) => {}
                     _ = keep_alive_interval.tick() => {
                         // It's time to send a Keep Alive message
                         handler.send_keep_alive(&mut output).await?;
-                    }
-                    _ = &mut cancellation_rx => {
-                        tracing::trace!("cancellation requested, peer exiting");
-                        break;
                     }
                 }
 
                 if !handler.peer_choked
                     && handler.present_pieces.is_some()
-                    && (handler.block_requests_queue.len() < PeerHandler::MAX_PENDING_BLOCK_REQUESTS
-                        && (handler.client_interested || handler.try_get_piece))
+                    && handler.block_requests_queue.len() < PeerHandler::MAX_PENDING_BLOCK_REQUESTS
                 {
-                    // Already done
-                    handler.try_get_piece = false;
-
-                    let client_interested = {
-                        let need_blocks = PeerHandler::MAX_PENDING_BLOCK_REQUESTS - handler.block_requests_queue.len();
-                        let number_of_pieces = need_blocks * 3 / handler.get_blocks_per_piece() + 1;
-                        let next_pieces = handler
-                            .state
-                            .write()
-                            .await
-                            // SAFETY: checked above
-                            .get_next_missing_piece_indexes(
-                                handler.peer_addr,
-                                handler.present_pieces.as_ref().unwrap(),
-                                number_of_pieces,
-                            )
-                            .context("bug: getting next pieces failed?")?;
-                        if let Some(piece_indexes) = next_pieces {
-                            // We found a new piece that can be downloaded from this peer
-                            // TODO: if next_piece len is lower than requested -> set a flag that we
-                            // shouldn't try to get any more pieces to avoid unncecessary locks
-                            for (index, ..) in piece_indexes.into_iter() {
-                                handler
-                                    .add_block_requests_for_piece(index)
-                                    .with_context(|| format!("adding block requests for piece: {}", index))?;
-                            }
-                            true
-                        } else {
-                            // The peer has nothing to offer, so stop trying until
-                            // we receive a `Have` message from him
-                            // NOTE: we don't send a non-intrerested message immediately if
-                            // we have some unsent or in-flight block requests
-                            !handler.block_requests_queue.is_empty() || !handler.sent_block_requests.is_empty()
+                    let need_blocks = PeerHandler::MAX_PENDING_BLOCK_REQUESTS - handler.block_requests_queue.len();
+                    let number_of_pieces = need_blocks * 3 / handler.get_blocks_per_piece() + 1;
+                    let next_pieces = handler
+                        .state
+                        .write()
+                        .await
+                        // SAFETY: checked above
+                        .get_next_missing_piece_indexes(
+                            handler.peer_addr,
+                            handler.present_pieces.as_ref().unwrap(),
+                            number_of_pieces,
+                        )
+                        .context("bug: getting next pieces failed?")?;
+                    if let Some(piece_indexes) = next_pieces {
+                        // We found new pieces that can be downloaded from this peer
+                        for (index, ..) in piece_indexes.into_iter() {
+                            handler
+                                .add_block_requests_for_piece(index)
+                                .with_context(|| format!("adding block requests for piece: {}", index))?;
                         }
-                    };
-
-                    if handler.client_interested != client_interested {
-                        handler.send_interested(client_interested, &mut output).await?;
                     }
                 }
 
@@ -163,8 +156,6 @@ struct PeerHandler {
     peer_interested: bool,
     /// Whether the remote peer choked the client
     peer_choked: bool,
-    /// If the handler should try to get a piece from this peer again
-    try_get_piece: bool,
 }
 
 impl PeerHandler {
@@ -183,7 +174,6 @@ impl PeerHandler {
             present_pieces: None,
             client_interested: false,
             peer_interested: false,
-            try_get_piece: false,
         }
     }
 
@@ -208,9 +198,6 @@ impl PeerHandler {
                     .ok_or_else(|| anyhow::anyhow!("bug: have message received before bitvec"))?;
 
                 bitvec.set(piece_idx as usize, true);
-
-                // We should try to get a piece from this peer, as a new one was just added
-                self.try_get_piece = true;
             }
             Bitfield(mut bitvec) => {
                 // Remove spare bits
@@ -230,7 +217,8 @@ impl PeerHandler {
             }
             Piece(Block { index, begin, block }) => {
                 if self.sent_block_requests.is_empty() {
-                    anyhow::bail!("bug: received a block while not downloading a piece");
+                    // A block was most likely cancelled before
+                    return Ok(None);
                 }
 
                 let Some(block_request_idx) = self
@@ -273,28 +261,6 @@ impl PeerHandler {
         };
 
         Ok(None)
-    }
-
-    #[tracing::instrument(level = "trace", ret, err, skip(self, output))]
-    async fn handle_system_event(&mut self, event: SystemEvent, output: &mut Vec<u8>) -> anyhow::Result<()> {
-        match event {
-            SystemEvent::NewPieceAdded(piece_idx) => self.send_have_message(piece_idx, output).await?,
-            SystemEvent::PieceFailed(piece_idx) => {
-                if let Some(present_pieces) = self.present_pieces.as_ref() {
-                    if present_pieces
-                        .get(try_into!(piece_idx, usize)?)
-                        .as_deref()
-                        .is_some_and(|&val| val)
-                    {
-                        // We should try to download the failing piece if it's available on the
-                        // current peer
-                        self.try_get_piece = true;
-                    }
-                }
-            }
-        };
-
-        Ok(())
     }
 
     #[tracing::instrument(err, skip(self))]

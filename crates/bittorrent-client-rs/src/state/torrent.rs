@@ -1,22 +1,23 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddrV4;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use bittorrent_peer_protocol::Block;
 use bitvec::order::Msb0;
 use bitvec::slice::BitSlice;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::RwLock;
 
-use super::event::PeerEvent;
-use crate::stats::{DOWNLOADED_BYTES, NUMBER_OF_PEERS};
+use super::event::{PeerEvent, TorrentManagerReq};
+use crate::stats::{DOWNLOADED_BYTES, DOWNLOADED_PIECES, NUMBER_OF_PEERS};
 use crate::storage::StorageOp;
 use crate::torrent_meta::TorrentMeta;
 use crate::util::piece_size_from_idx;
 use crate::Result;
+use tokio::time::sleep;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PieceState {
@@ -32,6 +33,7 @@ pub struct TorrentSharedState {
     peer_download_stats: HashMap<SocketAddrV4, (f64, f64)>,
     pieces: Vec<PieceState>,
     piece_download_progress: HashMap<u32, usize>,
+    cancellation_req_queue: VecDeque<(SocketAddrV4, u32)>,
 }
 
 impl TorrentSharedState {
@@ -40,11 +42,22 @@ impl TorrentSharedState {
             peer_download_stats: HashMap::new(),
             pieces: vec![PieceState::Queued; number_of_pieces],
             piece_download_progress: HashMap::with_capacity(number_of_pieces),
+            cancellation_req_queue: VecDeque::new(),
         })
     }
 }
 
 impl TorrentSharedState {
+    fn get_piece_steal_coeff(&self) -> f64 {
+        let total_pieces = self.pieces.len() as f64;
+        let downloaded_pieces = DOWNLOADED_PIECES.load(Ordering::Relaxed) as f64;
+        if downloaded_pieces / total_pieces >= 80. {
+            3.
+        } else {
+            10.
+        }
+    }
+
     /// Returns either a piece that we failed to download earlier or one that we didn't try yet.
     pub fn get_next_missing_piece_indexes(
         &mut self,
@@ -52,6 +65,7 @@ impl TorrentSharedState {
         peer_available_pieces: &BitSlice<u8, Msb0>,
         number_of_pieces: usize,
     ) -> anyhow::Result<Option<Vec<(u32, Option<SocketAddrV4>)>>> {
+        let piece_steal_coeff = self.get_piece_steal_coeff();
         let pieces = self
             .pieces
             .iter_mut()
@@ -79,7 +93,7 @@ impl TorrentSharedState {
                             None
                         // Compare elapsed time to requesting peer's average piece downloading time
                         } else if start.elapsed().as_secs_f64()
-                            > (requesting_peer_stats.0 / requesting_peer_stats.1) * 10.
+                            > (requesting_peer_stats.0 / requesting_peer_stats.1) * piece_steal_coeff
                         {
                             *status = PieceState::Downloading {
                                 peer: peer_addr,
@@ -100,7 +114,9 @@ impl TorrentSharedState {
 
         if let Some(pieces) = pieces.as_ref() {
             for (piece_idx, stolen_from) in pieces.iter().filter(|(_, stolen_from)| stolen_from.is_some()) {
-                // TODO: send cancellation requests
+                self.cancellation_req_queue
+                    .push_back((stolen_from.unwrap(), *piece_idx));
+
                 // Reset piece download progress
                 self.piece_download_progress.insert(*piece_idx, 0);
             }
@@ -135,13 +151,12 @@ pub struct Torrent {
     torrent_meta: TorrentMeta,
     shared_state: Arc<RwLock<TorrentSharedState>>,
     piece_hashes: Vec<[u8; 20]>,
-    piece_download_progress: HashMap<u32, usize>,
     /// Channels for sending peer-level events to peers
-    peer_cancellation_txs: HashMap<SocketAddrV4, oneshot::Sender<()>>,
+    peer_req_txs: HashMap<SocketAddrV4, mpsc::Sender<TorrentManagerReq>>,
     /// Channel for receiving peer-level events from peers
     rx: UnboundedReceiver<(SocketAddrV4, PeerEvent)>,
-    /// Channel for receiving cancellation channels for new peers
-    peer_cancel_rx: UnboundedReceiver<(SocketAddrV4, oneshot::Sender<()>)>,
+    /// Channel for receiving request channels for new peers
+    new_peer_req_rx: UnboundedReceiver<(SocketAddrV4, mpsc::Sender<TorrentManagerReq>)>,
     /// Channel for communicating with the storage backend
     storage_tx: mpsc::Sender<StorageOp>,
     /// Channel for receiving the result of checking piece hashes and storage-related errors
@@ -154,18 +169,17 @@ impl Torrent {
         state: Arc<RwLock<TorrentSharedState>>,
         piece_hashes: Vec<[u8; 20]>,
         rx: UnboundedReceiver<(SocketAddrV4, PeerEvent)>,
-        peer_cancel_rx: UnboundedReceiver<(SocketAddrV4, oneshot::Sender<()>)>,
+        new_peer_req_rx: UnboundedReceiver<(SocketAddrV4, mpsc::Sender<TorrentManagerReq>)>,
         storage_tx: mpsc::Sender<StorageOp>,
         storage_rx: mpsc::Receiver<(SocketAddrV4, u32, bool)>,
     ) -> Self {
         Torrent {
             torrent_meta,
             shared_state: state,
-            piece_download_progress: HashMap::with_capacity(piece_hashes.len()),
-            peer_cancellation_txs: HashMap::new(),
+            peer_req_txs: HashMap::new(),
             piece_hashes,
             rx,
-            peer_cancel_rx,
+            new_peer_req_rx,
             storage_tx,
             storage_rx,
         }
@@ -186,11 +200,12 @@ impl Torrent {
                                     self.add_block(&mut state, peer_addr, block).await?;
                                 }
                             }
-                            PeerEvent::Disconnected => { NUMBER_OF_PEERS.fetch_sub(1, Ordering::Relaxed);
+                            PeerEvent::Disconnected(reason) => { NUMBER_OF_PEERS.fetch_sub(1, Ordering::Relaxed);
+                                tracing::debug!(%peer_addr, %reason, "peer exited unexpectedly");
                                 // Drop peer cancellation tx
-                                self.get_peer_cancellation_tx(&peer_addr);
+                                self.remove_peer_req_tx(&peer_addr);
 
-                                if self.peer_cancellation_txs.is_empty() && !self.shared_state.read().await.finished_downloading() {
+                                if self.peer_req_txs.is_empty() && !self.shared_state.read().await.finished_downloading() {
                                     anyhow::bail!("All peers exited before finishing the torrent, the download is incomplete");
                                 }
                             }
@@ -221,8 +236,8 @@ impl Torrent {
                         shared_state.piece_download_progress.insert(piece_idx, 0);
 
                         drop(shared_state);
-                        if let Some(cancel_tx) = self.get_peer_cancellation_tx(&peer_addr) {
-                            if cancel_tx.send(()).is_err() {
+                        if let Some(req_tx) = self.remove_peer_req_tx(&peer_addr) {
+                            if req_tx.send(TorrentManagerReq::Disconnect("piece hash verification failed")).await.is_err() {
                                 tracing::error!(
                                     %peer_addr,
                                     "error while shutting down a peer: peer already dropped the receiver"
@@ -234,27 +249,37 @@ impl Torrent {
 
                         let downloaded_bytes = shared_state.piece_download_progress.get(&piece_idx).context("bug: downloaded a piece but didn't track its bytes?")?;
                         DOWNLOADED_BYTES.fetch_add(*downloaded_bytes, Ordering::Relaxed);
+                        DOWNLOADED_PIECES.fetch_add(1, Ordering::Relaxed);
 
                         if shared_state.finished_downloading() {
                             tracing::debug!("all pieces were downloaded; shutting down peers");
-                            self.peer_cancellation_txs.drain().for_each(|(peer_addr, cancel_tx)| {
-                                if cancel_tx.send(()).is_err() {
+                            for (peer_addr, req_tx) in self.peer_req_txs.drain() {
+                                if req_tx.send(TorrentManagerReq::Disconnect("finished downloading")).await.is_err() {
                                     tracing::error!(
                                         %peer_addr,
                                         "error while shutting down a peer: peer already dropped the receiver"
                                     );
                                 }
-                            });
+                            };
                             break;
                         }
                     }
                 },
-                result = self.peer_cancel_rx.recv() => {
+                result = self.new_peer_req_rx.recv() => {
                     if let Some((peer_addr, peer_tx_channel)) = result {
                         NUMBER_OF_PEERS.fetch_add(1, Ordering::Relaxed);
-                        self.peer_cancellation_txs.insert(peer_addr, peer_tx_channel);
+                        self.peer_req_txs.insert(peer_addr, peer_tx_channel);
                     };
                 }
+                _ = sleep(Duration::from_secs(2)) => {}
+            }
+            let mut state = self.shared_state.write().await;
+            while let Some((peer_addr, piece_idx)) = state.cancellation_req_queue.pop_front() {
+                self.get_peer_req_tx(&peer_addr)
+                    .context("bug: peer doesn't have an associated req sender?")?
+                    .send(TorrentManagerReq::CancelPiece(piece_idx))
+                    .await
+                    .context("sending cancellation request failed")?;
             }
         }
 
@@ -347,8 +372,12 @@ impl Torrent {
         Ok(())
     }
 
-    fn get_peer_cancellation_tx(&mut self, peer_addr: &SocketAddrV4) -> Option<oneshot::Sender<()>> {
-        self.peer_cancellation_txs.remove(peer_addr)
+    fn get_peer_req_tx(&self, peer_addr: &SocketAddrV4) -> Option<&mpsc::Sender<TorrentManagerReq>> {
+        self.peer_req_txs.get(peer_addr)
+    }
+
+    fn remove_peer_req_tx(&mut self, peer_addr: &SocketAddrV4) -> Option<mpsc::Sender<TorrentManagerReq>> {
+        self.peer_req_txs.remove(peer_addr)
     }
 
     fn get_piece_hash(&self, index: usize) -> Option<&[u8; 20]> {
