@@ -105,8 +105,6 @@ async fn main() -> anyhow::Result<()> {
 
         let info_hash = meta_info.info.hash()?;
 
-        let torrent_state = Arc::new(RwLock::new(TorrentSharedState::new(pieces_total)?));
-
         let (peer_event_tx, peer_event_rx) = unbounded_channel();
 
         let (new_peer_tx, new_peer_rx) = unbounded_channel();
@@ -126,20 +124,44 @@ async fn main() -> anyhow::Result<()> {
         )
         .context("TorrentMeta")?;
 
-        let (torrent_task, storage_task) = {
-            let mut base_path = fs::canonicalize(".")?;
+        let mut base_path = fs::canonicalize(".")?;
+        // TODO: make this a CLI arg
+        base_path.push("downloads");
+
+        // Multi-file mode: add directory name
+        if meta_info.info.files.is_some() {
+            base_path.push(&meta_info.info.name);
+        }
+
+        let (storage_tx, storage_rx) = mpsc::channel(200);
+        let mut storage_manager =
+            StorageManager::new(&mut meta_info.info, &base_path).context("error while creating a storage manager")?;
+
+        let splitted_piece_hashes = meta_info
+            .info
+            .pieces
+            .chunks(20)
+            .map(|item| try_into!(item, [u8; 20]))
+            .collect::<Result<Vec<[u8; 20]>>>()?;
+
+        // TODO: update download stats if we continue downloading from a certain piece
+        let starting_piece = match storage_manager
             // TODO: make this a CLI arg
-            base_path.push("downloads");
-
-            // Multi-file mode: add directory name
-            if meta_info.info.files.is_some() {
-                base_path.push(&meta_info.info.name);
+            .verify_downloaded_files(&splitted_piece_hashes)
+            .context("error while doing initial checksums verification")?
+        {
+            Some(piece_idx) => piece_idx,
+            None => {
+                tracing::info!("All files were downloaded already, exiting...");
+                return Ok(());
             }
+        };
 
-            let (storage_tx, storage_rx) = mpsc::channel(200);
-            let mut storage_manager = StorageManager::new(&mut meta_info.info, &base_path)
-                .context("error while creating a storage manager")?;
+        dbg!(starting_piece);
 
+        let torrent_state = Arc::new(RwLock::new(TorrentSharedState::new(pieces_total, starting_piece)?));
+
+        let (torrent_task, storage_task) = {
             let (hash_check_tx, hash_check_rx) = mpsc::channel(200);
 
             let storage_handle =
@@ -149,19 +171,12 @@ async fn main() -> anyhow::Result<()> {
 
             let torrent_meta = torrent_meta.clone();
             let torrent_handle = tokio::spawn(async move {
-                let splitted_piece_hashes: Result<_> = meta_info
-                    .info
-                    .pieces
-                    .chunks(20)
-                    .map(|item| try_into!(item, [u8; 20]))
-                    .collect();
-
                 // TODO: this struct will most likely need peer_id in order to finish downloading
                 // torrents and send keep alives
                 let mut torrent = Torrent::new(
                     torrent_meta,
                     torrent_state,
-                    splitted_piece_hashes?,
+                    splitted_piece_hashes,
                     peer_event_rx,
                     new_peer_rx,
                     storage_tx,

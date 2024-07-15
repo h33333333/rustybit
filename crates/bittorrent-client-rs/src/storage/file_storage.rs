@@ -21,6 +21,7 @@ impl FileStorage {
             .with_context(|| format!("error while creating parent directories for a file: {:?}", path))?;
             let f = std::fs::OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .write(true)
                 .read(true)
                 .open(path)
@@ -52,7 +53,15 @@ impl Storage for FileStorage {
         let file = &mut self.files.get(file_idx).context("bug: non-existing file index?")?;
         file.seek(SeekFrom::Start(offset))
             .context("error while seeking the provided offset")?;
-        file.read_exact(buf).expect("error while reading from file");
+        file.read_exact(buf).context("error while reading from file")?;
+
+        Ok(())
+    }
+
+    #[tracing::instrument(err, skip(self, buf))]
+    fn read_to_end(&mut self, file_idx: usize, buf: &mut Vec<u8>) -> anyhow::Result<()> {
+        let file = &mut self.files.get(file_idx).context("bug: non-existing file index?")?;
+        file.read_to_end(buf).context("error while reading from file")?;
 
         Ok(())
     }

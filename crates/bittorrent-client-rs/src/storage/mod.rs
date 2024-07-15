@@ -3,6 +3,7 @@ mod file_storage;
 use anyhow::Context;
 use bittorrent_peer_protocol::Block;
 use sha1::{Digest, Sha1};
+use std::cmp::Ordering;
 use std::net::SocketAddrV4;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
@@ -26,6 +27,7 @@ pub struct StorageManager {
 pub trait Storage {
     fn write_all(&mut self, file_idx: usize, offset: u64, data: &[u8]) -> anyhow::Result<()>;
     fn read_exact(&mut self, file_idx: usize, offset: u64, buf: &mut [u8]) -> anyhow::Result<()>;
+    fn read_to_end(&mut self, file_idx: usize, buf: &mut Vec<u8>) -> anyhow::Result<()>;
 }
 
 impl StorageManager {
@@ -52,6 +54,151 @@ impl StorageManager {
             torrent_mode,
             piece_length: torrent_info.piece_length,
         })
+    }
+
+    // TODO: this is too slow. How can I speed it up?
+    pub fn verify_downloaded_files(&mut self, piece_hashes: &[[u8; 20]]) -> anyhow::Result<Option<usize>> {
+        let expected_piece_length = try_into!(self.piece_length, usize)?;
+        match &self.torrent_mode {
+            TorrentMode::SingleFile(file_info) => {
+                let max_expected_length = try_into!(file_info.length, usize)?;
+                let mut file_contents_buf = Vec::with_capacity(max_expected_length);
+                self.storage
+                    .read_to_end(0, &mut file_contents_buf)
+                    .context("error while reading file contents for verification")?;
+
+                match file_contents_buf.len().cmp(&max_expected_length) {
+                    Ordering::Greater => {
+                        // File is too big, we will have to start downloading it from the beginning
+                        return Ok(Some(0));
+                    }
+                    Ordering::Equal => {
+                        // TODO: verify MD5 hash here
+                        if let Some(expected_md5_hash) = &file_info.md5_sum {
+                            let calculated_hash = md5::compute(&file_contents_buf);
+                            if expected_md5_hash == &String::from_utf8(calculated_hash.to_ascii_lowercase())? {
+                                return Ok(None);
+                            }
+                        }
+                    }
+                    Ordering::Less => {}
+                };
+
+                let mut hasher = Sha1::new();
+                for (piece_idx, piece) in file_contents_buf.chunks(expected_piece_length).enumerate() {
+                    hasher.update(piece);
+
+                    let calculated_hash: [u8; 20] = hasher.finalize_reset().into();
+                    let expected_hash = piece_hashes.get(piece_idx).with_context(|| {
+                        format!(
+                            "bug: no hash for a piece: idx {}, total hashes {}",
+                            piece_idx,
+                            piece_hashes.len()
+                        )
+                    })?;
+
+                    if &calculated_hash != expected_hash {
+                        // Verification of the current piece has failed, so we should start downloading from it
+                        return Ok(Some(piece_idx));
+                    }
+                }
+            }
+            TorrentMode::MultiFile(file_infos) => {
+                // Reuse the same buffer, clearing it for each new file
+                let mut file_contents_buf = Vec::with_capacity(try_into!(file_infos[0].length, usize)?);
+                let mut hasher = Sha1::new();
+                let mut cross_file_piece_bytes_left = 0;
+                let mut piece_idx = 0;
+
+                let mut file_infos_iter = file_infos.iter().peekable();
+                while let Some(file_info) = file_infos_iter.next() {
+                    let max_expected_length = try_into!(file_info.length, usize)?;
+                    self.storage
+                        .read_to_end(0, &mut file_contents_buf)
+                        .context("error while reading file contents for verification")?;
+
+                    match file_contents_buf.len().cmp(&max_expected_length) {
+                        Ordering::Greater => {
+                            // File is too big, we will have to start downloading it from the beginning
+                            return Ok(Some(piece_idx));
+                        }
+                        Ordering::Equal => {
+                            // TODO: verify MD5 hash here
+                            // FIXME: I shouldn't return here, as the previous file check could
+                            // have failed and we can still have cross_file_piece_bytes_left set
+
+                            continue;
+                        }
+                        Ordering::Less => {}
+                    };
+
+                    if cross_file_piece_bytes_left > 0 {
+                        let Some(missing_piece_bytes) = file_contents_buf.get(0..cross_file_piece_bytes_left) else {
+                            // If we don't have enough bytes to calculate the piece hash, then this
+                            // piece is the problematic one and we should download it again.
+                            return Ok(Some(piece_idx));
+                        };
+
+                        hasher.update(missing_piece_bytes);
+                        let calculated_hash: [u8; 20] = hasher.finalize_reset().into();
+                        let expected_hash = piece_hashes.get(piece_idx).with_context(|| {
+                            format!(
+                                "bug: no hash for a piece: idx {}, total hashes {}",
+                                piece_idx,
+                                piece_hashes.len()
+                            )
+                        })?;
+
+                        if &calculated_hash != expected_hash {
+                            // Verification of the cross-file piece has failed, so we should start downloading from it
+                            return Ok(Some(piece_idx));
+                        }
+
+                        piece_idx += 1;
+                        file_contents_buf.drain(0..cross_file_piece_bytes_left);
+                        cross_file_piece_bytes_left = 0;
+                    }
+
+                    for piece in file_contents_buf.chunks(expected_piece_length) {
+                        hasher.update(piece);
+
+                        if piece.len() < expected_piece_length
+                            && file_contents_buf.len() == max_expected_length
+                            && file_infos_iter.peek().is_some()
+                        {
+                            // NOTE: we can only get in here if we have a full file, its MD5
+                            // checksum verification has failed, and there is at least one more file.
+                            // If this is the case, then the last piece of the file is the failing one
+                            // (because otherwise we would have returned earlier) and it also crosses the file boundary.
+
+                            // This piece crosses file boundary, so we can verify its hash only
+                            // when we read the next file
+                            cross_file_piece_bytes_left = expected_piece_length - piece.len();
+                            continue;
+                        }
+
+                        let calculated_hash: [u8; 20] = hasher.finalize_reset().into();
+                        let expected_hash = piece_hashes.get(piece_idx).with_context(|| {
+                            format!(
+                                "bug: no hash for a piece: idx {}, total hashes {}",
+                                piece_idx,
+                                piece_hashes.len()
+                            )
+                        })?;
+
+                        if &calculated_hash != expected_hash {
+                            // Verification of the current piece has failed, so we should start downloading from it
+                            return Ok(Some(piece_idx));
+                        }
+
+                        piece_idx += 1;
+                    }
+                    file_contents_buf.clear();
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     pub async fn listen_for_blocks(
