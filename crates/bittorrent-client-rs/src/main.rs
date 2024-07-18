@@ -109,13 +109,6 @@ async fn main() -> anyhow::Result<()> {
 
         let (new_peer_tx, new_peer_rx) = unbounded_channel();
 
-        let (stats_cancel_tx, stats_cancel_rx) = oneshot::channel();
-        let stats_task = {
-            let length = try_into!(length, usize).context("starting a stats task")?;
-            let mut stats = Stats::new(0, length, length);
-            tokio::spawn(async move { stats.collect_stats(stats_cancel_rx).await })
-        };
-
         let torrent_meta = TorrentMeta::new(
             info_hash,
             try_into!(piece_length, usize)?,
@@ -134,8 +127,8 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let (storage_tx, storage_rx) = mpsc::channel(200);
-        let mut storage_manager =
-            StorageManager::new(&mut meta_info.info, &base_path).context("error while creating a storage manager")?;
+        let mut storage_manager = StorageManager::new(&mut meta_info.info, &base_path, length)
+            .context("error while creating a storage manager")?;
 
         let splitted_piece_hashes = meta_info
             .info
@@ -147,7 +140,8 @@ async fn main() -> anyhow::Result<()> {
         // TODO: update download stats if we continue downloading from a certain piece
         let starting_piece = match storage_manager
             // TODO: make this a CLI arg
-            .verify_downloaded_files(&splitted_piece_hashes)
+            .checksum_verification(&splitted_piece_hashes)
+            .await
             .context("error while doing initial checksums verification")?
         {
             Some(piece_idx) => piece_idx,
@@ -189,6 +183,13 @@ async fn main() -> anyhow::Result<()> {
             });
 
             (torrent_handle, storage_handle)
+        };
+
+        let (stats_cancel_tx, stats_cancel_rx) = oneshot::channel();
+        let stats_task = {
+            let length = try_into!(length, usize).context("starting a stats task")?;
+            let mut stats = Stats::new(0, length, length);
+            tokio::spawn(async move { stats.collect_stats(stats_cancel_rx).await })
         };
 
         let mut peer_handler_tasks = JoinSet::new();

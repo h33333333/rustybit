@@ -37,12 +37,13 @@ pub struct TorrentSharedState {
 }
 
 impl TorrentSharedState {
-    pub fn new(number_of_pieces: usize, starting_piece: usize) -> Result<Self> {
-        let mut pieces = (0..starting_piece)
+    pub fn new(number_of_pieces: usize, starting_piece_idx: u32) -> Result<Self> {
+        let starting_piece_idx = try_into!(starting_piece_idx, usize)?;
+        let mut pieces = (0..starting_piece_idx)
             .map(|_| PieceState::Verified)
             .collect::<Vec<PieceState>>();
 
-        pieces.extend((0..number_of_pieces - starting_piece).map(|_| PieceState::Queued));
+        pieces.extend((0..number_of_pieces - starting_piece_idx).map(|_| PieceState::Queued));
 
         Ok(TorrentSharedState {
             peer_download_stats: HashMap::new(),

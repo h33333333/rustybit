@@ -1,13 +1,14 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 use anyhow::Context;
 
-use super::Storage;
+use super::{AsyncReadSeek, Storage};
 
 pub struct FileStorage {
-    files: Vec<File>,
+    files: Vec<(PathBuf, File)>,
 }
 
 impl FileStorage {
@@ -30,9 +31,8 @@ impl FileStorage {
             f.set_len(*file_len)
                 .with_context(|| format!("error while setting the file's length: {path:?}, {file_len}"))?;
 
-            files.push(f);
+            files.push((path.to_path_buf(), f));
         }
-
         Ok(FileStorage { files })
     }
 }
@@ -40,7 +40,11 @@ impl FileStorage {
 impl Storage for FileStorage {
     #[tracing::instrument(err, skip(self, buf))]
     fn write_all(&mut self, file_idx: usize, offset: u64, buf: &[u8]) -> anyhow::Result<()> {
-        let file = &mut self.files.get(file_idx).context("bug: non-existing file index?")?;
+        let file = &mut self
+            .files
+            .get(file_idx)
+            .map(|(_, file)| file)
+            .context("bug: non-existing file index?")?;
         file.seek(SeekFrom::Start(offset))
             .context("error while seeking the provided offset")?;
         file.write_all(buf).context("error while writing to file")?;
@@ -50,7 +54,11 @@ impl Storage for FileStorage {
 
     #[tracing::instrument(err, skip(self, buf))]
     fn read_exact(&mut self, file_idx: usize, offset: u64, buf: &mut [u8]) -> anyhow::Result<()> {
-        let file = &mut self.files.get(file_idx).context("bug: non-existing file index?")?;
+        let file = &mut self
+            .files
+            .get(file_idx)
+            .map(|(_, file)| file)
+            .context("bug: non-existing file index?")?;
         file.seek(SeekFrom::Start(offset))
             .context("error while seeking the provided offset")?;
         file.read_exact(buf).context("error while reading from file")?;
@@ -58,11 +66,21 @@ impl Storage for FileStorage {
         Ok(())
     }
 
-    #[tracing::instrument(err, skip(self, buf))]
-    fn read_to_end(&mut self, file_idx: usize, buf: &mut Vec<u8>) -> anyhow::Result<()> {
-        let file = &mut self.files.get(file_idx).context("bug: non-existing file index?")?;
-        file.read_to_end(buf).context("error while reading from file")?;
+    #[tracing::instrument(err, skip(self))]
+    fn get_ro_file(&self, file_idx: usize) -> anyhow::Result<Pin<Box<dyn AsyncReadSeek + Send>>> {
+        let file_path = self
+            .files
+            .get(file_idx)
+            .map(|(path, _)| path)
+            .context("bug: non-existing file index?")?;
 
-        Ok(())
+        let file = tokio::fs::File::from_std(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .open(file_path)
+                .context("error while opening a RO file")?,
+        );
+
+        Ok(Box::pin(file) as Pin<Box<dyn AsyncReadSeek + Send>>)
     }
 }
