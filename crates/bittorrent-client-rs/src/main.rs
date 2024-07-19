@@ -37,7 +37,6 @@ fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
 
 // TODO: implement DHT?
 // TODO: global code refactoring/restructuring
-// TODO: allow continuing torrents if they already were partially downloaded
 
 #[tokio::main]
 #[tracing::instrument(err)]
