@@ -59,7 +59,7 @@ impl TorrentSharedState {
         let total_pieces = self.pieces.len() as f64;
         let downloaded_pieces = DOWNLOADED_PIECES.load(Ordering::Relaxed) as f64;
         if downloaded_pieces / total_pieces >= 80. {
-            3.
+            2.
         } else {
             10.
         }
@@ -95,12 +95,17 @@ impl TorrentSharedState {
                             return None;
                         }
 
+                        let downloading_peer_stats = self.peer_download_stats.entry(peer).or_insert((0., 0.));
+                        let downloading_peer_avg_time = downloading_peer_stats.1 / downloading_peer_stats.0;
+
                         let requesting_peer_stats = self.peer_download_stats.entry(peer_addr).or_insert((0., 0.));
                         if requesting_peer_stats.1 == 0. {
                             None
+
                         // Compare elapsed time to requesting peer's average piece downloading time
                         } else if start.elapsed().as_secs_f64()
-                            > (requesting_peer_stats.0 / requesting_peer_stats.1) * piece_steal_coeff
+                            > (requesting_peer_stats.1 / requesting_peer_stats.0) * piece_steal_coeff
+                            || start.elapsed().as_secs_f64() > downloading_peer_avg_time * piece_steal_coeff
                         {
                             *status = PieceState::Downloading {
                                 peer: peer_addr,
