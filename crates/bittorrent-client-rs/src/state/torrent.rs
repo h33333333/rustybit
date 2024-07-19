@@ -312,7 +312,7 @@ impl Torrent {
         Ok(())
     }
 
-    #[tracing::instrument(err, skip(self, begin, block))]
+    #[tracing::instrument(err, skip(self, state, begin, block))]
     async fn add_block(
         &self,
         state: &mut TorrentSharedState,
@@ -327,8 +327,6 @@ impl Torrent {
             self.torrent_meta.piece_size,
             index,
         )?;
-
-        tracing::trace!(index, begin, block_len = block.len(), "block info");
 
         if *downloaded_bytes + block.len() > expected_piece_size {
             // TODO: do not bail, disconnect only one peer
