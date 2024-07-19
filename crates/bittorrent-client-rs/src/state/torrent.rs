@@ -156,6 +156,15 @@ impl TorrentSharedState {
             *piece_state = PieceState::Verified
         };
     }
+
+    pub fn on_peer_disconnect(&mut self, dead_peer_addr: &SocketAddrV4) {
+        self.pieces.iter_mut().for_each(|piece| match piece {
+            PieceState::Downloading { peer, .. } if peer == dead_peer_addr => {
+                *piece = PieceState::Queued;
+            }
+            _ => {}
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -212,10 +221,13 @@ impl Torrent {
                                     self.add_block(&mut state, peer_addr, block).await?;
                                 }
                             }
-                            PeerEvent::Disconnected => { NUMBER_OF_PEERS.fetch_sub(1, Ordering::Relaxed);
+                            PeerEvent::Disconnected => {
                                 tracing::debug!(%peer_addr, "peer exited unexpectedly");
                                 // Drop peer cancellation tx
                                 self.remove_peer_req_tx(&peer_addr);
+
+                                NUMBER_OF_PEERS.fetch_sub(1, Ordering::Relaxed);
+                                self.shared_state.write().await.on_peer_disconnect(&peer_addr);
 
                                 if self.peer_req_txs.is_empty() && !self.shared_state.read().await.finished_downloading() {
                                     anyhow::bail!("All peers exited before finishing the torrent, the download is incomplete");
@@ -287,11 +299,12 @@ impl Torrent {
             }
             let mut state = self.shared_state.write().await;
             while let Some((peer_addr, piece_idx)) = state.cancellation_req_queue.pop_front() {
-                self.get_peer_req_tx(&peer_addr)
-                    .context("bug: peer doesn't have an associated req sender?")?
-                    .send(TorrentManagerReq::CancelPiece(piece_idx))
-                    .await
-                    .context("sending cancellation request failed")?;
+                if let Some(sender) = self.get_peer_req_tx(&peer_addr) {
+                    sender
+                        .send(TorrentManagerReq::CancelPiece(piece_idx))
+                        .await
+                        .context("sending cancellation request failed")?;
+                }
             }
         }
 
