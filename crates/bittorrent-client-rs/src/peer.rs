@@ -51,10 +51,6 @@ pub async fn handle_peer(
 
     tracing::trace!("read a handshake");
 
-    let mut keep_alive_interval = time::interval(Duration::from_secs(120));
-    // Skip the first tick, as it completes immediately and we just opened a new connection
-    keep_alive_interval.tick().await;
-
     let mut output = Vec::with_capacity(metadata.piece_size * 2);
     let mut handler = PeerHandler::new(state, metadata, peer_addr);
 
@@ -67,6 +63,11 @@ pub async fn handle_peer(
 
     let clonex_tx = tx.clone();
     let task_handle = tokio::spawn(async move {
+        let mut piece_request_interval = time::interval(Duration::from_secs(1));
+        let mut keep_alive_interval = time::interval(Duration::from_secs(120));
+        // Skip the first tick, as it completes immediately and we just opened a new connection
+        keep_alive_interval.tick().await;
+
         loop {
             tokio::select! {
                 message = read_buf.read_message(&mut stream).with_elapsed("read_message", Some(Duration::from_millis(100))) => {
@@ -90,7 +91,8 @@ pub async fn handle_peer(
                         }
                     }
                 }
-                _ = time::sleep(Duration::from_secs(2)) => {}
+                // Try to steal a piece
+                _ = piece_request_interval.tick() => {}
                 _ = keep_alive_interval.tick() => {
                     // It's time to send a Keep Alive message
                     handler.send_keep_alive(&mut output).await?;

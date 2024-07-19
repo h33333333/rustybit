@@ -17,7 +17,7 @@ use crate::storage::StorageOp;
 use crate::torrent_meta::TorrentMeta;
 use crate::util::piece_size_from_idx;
 use crate::Result;
-use tokio::time::sleep;
+use tokio::time;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PieceState {
@@ -208,6 +208,7 @@ impl Torrent {
 
     #[tracing::instrument(err, skip(self))]
     pub async fn handle(&mut self) -> anyhow::Result<()> {
+        let mut interval = time::interval(Duration::from_secs(2));
         loop {
             tokio::select! {
                 result = self.rx.recv() => {
@@ -295,7 +296,7 @@ impl Torrent {
                         self.peer_req_txs.insert(peer_addr, peer_tx_channel);
                     };
                 }
-                _ = sleep(Duration::from_secs(2)) => {}
+                _ = interval.tick() => {}
             }
             let mut state = self.shared_state.write().await;
             while let Some((peer_addr, piece_idx)) = state.cancellation_req_queue.pop_front() {
