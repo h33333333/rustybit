@@ -3,3 +3,4 @@ members = ["crates/*"]
 
 [workspace.dependencies]
 bittorrent-peer-protocol = { path = "./crates/bittorrent-peer-protocol/" }
+leechy-dht = { path = "./crates/leechy-dht" }

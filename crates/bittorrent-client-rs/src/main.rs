@@ -1,19 +1,23 @@
 use std::fs;
 use std::io::Read;
+use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
 use bittorrent_client_rs::logging::setup_logger;
-use bittorrent_client_rs::stats::Stats;
+use bittorrent_client_rs::stats::{Stats, CONNECTING_PEERS, NUMBER_OF_PEERS};
 use bittorrent_client_rs::tracker::TrackerRequest;
 use bittorrent_client_rs::util::generate_peer_id;
 use bittorrent_client_rs::{args, handle_peer, parser, torrent_meta::TorrentMeta, tracker, try_into, StorageManager};
-use bittorrent_client_rs::{Error, Result};
+use bittorrent_client_rs::{Error, FileStorage, PieceHashVerifier, Result, Storage, TorrentFileMetadata};
 use bittorrent_client_rs::{Torrent, TorrentSharedState};
 use clap::Parser;
+use leechy_dht::DhtRequester;
 use tokio::sync::mpsc::{self, unbounded_channel};
 use tokio::sync::{oneshot, RwLock};
 use tokio::task::JoinSet;
+use tracing::Instrument;
 use url::Url;
 
 fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
@@ -92,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .context("error while parsing the tracker's response")?;
 
-    let peers = match resp.get_peers() {
+    let mut peers = match resp.get_peers() {
         Some(peers) => peers?,
         None => bail!("peers are missing in the tracker response"),
     };
@@ -126,8 +130,10 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let (storage_tx, storage_rx) = mpsc::channel(200);
-        let mut storage_manager = StorageManager::new(&mut meta_info.info, &base_path, length)
-            .context("error while creating a storage manager")?;
+        let file_metadata = TorrentFileMetadata::new(&mut meta_info.info, &base_path).context("bug: bad metadata")?;
+        let mut storage =
+            FileStorage::new(&file_metadata.file_infos).context("error while creating a file-based storage")?;
+        let mut piece_hash_verifier = PieceHashVerifier::new(try_into!(piece_length, usize)?);
 
         let splitted_piece_hashes = meta_info
             .info
@@ -136,11 +142,14 @@ async fn main() -> anyhow::Result<()> {
             .map(|item| try_into!(item, [u8; 20]))
             .collect::<Result<Vec<[u8; 20]>>>()?;
 
-        // TODO: update download stats if we continue downloading from a certain piece
-        let starting_piece = match storage_manager
-            // TODO: make this a CLI arg
-            .checksum_verification(&splitted_piece_hashes)
-            .await
+        tracing::info!("Starting initial checksum verification");
+        let starting_piece = match piece_hash_verifier
+            .check_all_pieces(
+                &mut storage,
+                &file_metadata.file_infos,
+                &splitted_piece_hashes,
+                try_into!(length, usize)?,
+            )
             .context("error while doing initial checksums verification")?
         {
             Some(piece_idx) => piece_idx,
@@ -149,16 +158,25 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
         };
-
-        dbg!(starting_piece);
+        tracing::info!(%starting_piece, "Finished initial checksum verification, found a starting piece");
 
         let torrent_state = Arc::new(RwLock::new(TorrentSharedState::new(pieces_total, starting_piece)?));
 
         let (torrent_task, storage_task) = {
             let (hash_check_tx, hash_check_rx) = mpsc::channel(200);
 
-            let storage_handle =
-                tokio::spawn(async move { storage_manager.listen_for_blocks(storage_rx, hash_check_tx).await });
+            let storage_handle = tokio::task::spawn(async move {
+                let mut storage_manager = StorageManager::new(
+                    &mut storage as &mut dyn Storage,
+                    file_metadata,
+                    meta_info.info.piece_length,
+                    piece_hash_verifier,
+                    pieces_total,
+                    length,
+                )
+                .context("error while creating a storage manager")?;
+                storage_manager.listen_for_blocks(storage_rx, hash_check_tx).await
+            });
 
             let torrent_state = torrent_state.clone();
 
@@ -191,31 +209,77 @@ async fn main() -> anyhow::Result<()> {
             tokio::spawn(async move { stats.collect_stats(stats_cancel_rx).await })
         };
 
-        let mut peer_handler_tasks = JoinSet::new();
-        for peer_address in peers.into_iter() {
-            let peer_state = torrent_state.clone();
-            let peer_event_tx = peer_event_tx.clone();
+        let (peer_queue_tx, mut peer_queue_rx) = mpsc::channel(10);
+        let peers_c = peers.clone();
+        let peer_manager_task = tokio::spawn(
+            async move {
+                let spawn_peer = move |set: &mut JoinSet<anyhow::Result<()>>, peer_addr: SocketAddrV4| {
+                    let peer_state = torrent_state.clone();
+                    let peer_event_tx = peer_event_tx.clone();
 
-            peer_handler_tasks.spawn(handle_peer(
-                peer_address,
-                torrent_meta.clone(),
-                peer_id,
-                peer_state,
-                peer_event_tx,
-                new_peer_tx.clone(),
-            ));
-        }
+                    set.spawn(handle_peer(
+                        peer_addr,
+                        torrent_meta.clone(),
+                        peer_id,
+                        peer_state,
+                        peer_event_tx,
+                        new_peer_tx.clone(),
+                    ));
+                };
 
-        drop(new_peer_tx);
-        drop(peer_event_tx);
+                let mut peer_handler_tasks = JoinSet::new();
+                // Process all initial peers
+                for peer_address in peers_c.into_iter() {
+                    spawn_peer(&mut peer_handler_tasks, peer_address);
+                }
 
-        while let Some(peer_handler_result) = peer_handler_tasks.join_next().await {
-            if let Err(e) = peer_handler_result.context("peer handler task")? {
-                tracing::error!("an error happened in the peer: {:#}", e);
+                loop {
+                    tokio::select! {
+                        Some(next_peer) = peer_queue_rx.recv(), if CONNECTING_PEERS.load(Ordering::Relaxed) < 25 && NUMBER_OF_PEERS.load(Ordering::Relaxed) < 40 => {
+                            spawn_peer(&mut peer_handler_tasks, next_peer)
+                        },
+                        Some(peer_handler_result) = peer_handler_tasks.join_next() => {
+                            if let Err(e) = peer_handler_result.context("peer handler task")? {
+                                tracing::error!("an error happened in the peer: {:#}", e);
+                            }
+                        }
+                        else => {
+                            tracing::info!("peer queue sender and all peers exited, shutting down the peer manager");
+                            break;
+                        }
+                    }
+                }
+
+                Ok::<(), anyhow::Error>(())
+            }
+            .instrument(tracing::trace_span!("peer manager task")),
+        );
+
+        let mut dht_bootstrap_nodes = Vec::with_capacity(2);
+        for node in ["dht.transmissionbt.com:6881", "dht.libtorrent.org:25401"] {
+            if let SocketAddr::V4(addr) = node.to_socket_addrs().context("to socket addr")?.next().unwrap() {
+                dht_bootstrap_nodes.push(addr);
+                peers.iter_mut().for_each(|addr| addr.set_port(6881));
+                // dht_bootstrap_nodes.extend(peers.iter());
             }
         }
 
+        let (dht_cancel_tx, dht_cancel_rx) = oneshot::channel();
+
+        let mut dht_requester = DhtRequester::new(dht_bootstrap_nodes, info_hash).context("creating DhtRequester")?;
+        let dht_requester_task =
+            tokio::spawn(async move { dht_requester.process_dht_nodes(dht_cancel_rx, peer_queue_tx).await });
+
         torrent_task.await.context("torrent task")??;
+
+        let _ = dht_cancel_tx.send(());
+
+        peer_manager_task
+            .await
+            .context("peer manager task panicked?")?
+            .context("peer manager task")?;
+
+        dht_requester_task.await.context("dht requester task")??;
 
         storage_task.await.context("storage task")??;
 

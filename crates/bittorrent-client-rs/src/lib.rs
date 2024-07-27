@@ -20,7 +20,7 @@ use std::{future::Future, time::Duration};
 pub use error::{Error, Result};
 pub use peer::handle_peer;
 pub use state::torrent::{Torrent, TorrentSharedState};
-pub use storage::StorageManager;
+pub use storage::{FileStorage, PieceHashVerifier, Storage, StorageManager, TorrentFileMetadata};
 
 pub(crate) const DEFAULT_BLOCK_SIZE: u32 = 16_384;
 

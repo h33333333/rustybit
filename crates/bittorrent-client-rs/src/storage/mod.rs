@@ -6,15 +6,16 @@ mod util;
 use bittorrent_peer_protocol::Block;
 use std::net::SocketAddrV4;
 use std::path::PathBuf;
-use std::pin::Pin;
-use tokio::io::{AsyncRead, AsyncSeek};
 
+pub use file_storage::FileStorage;
+pub use piece_hash_verifier::PieceHashVerifier;
 pub use storage_manager::StorageManager;
+pub use storage_manager::TorrentFileMetadata;
 
 #[derive(Debug)]
 pub struct FileInfo {
-    path: PathBuf,
-    length: u64,
+    pub path: PathBuf,
+    pub length: u64,
 }
 
 impl FileInfo {
@@ -28,12 +29,7 @@ pub enum StorageOp {
     CheckPieceHash((SocketAddrV4, u32, [u8; 20])),
 }
 
-trait AsyncReadSeek: AsyncRead + AsyncSeek {}
-
-impl<T> AsyncReadSeek for T where T: AsyncRead + AsyncSeek {}
-
-trait Storage {
+pub trait Storage: Send + Sync {
     fn write_all(&mut self, file_idx: usize, offset: u64, data: &[u8]) -> anyhow::Result<()>;
-    fn read_exact(&mut self, file_idx: usize, offset: u64, buf: &mut [u8]) -> anyhow::Result<()>;
-    fn get_ro_file(&self, file_idx: usize) -> anyhow::Result<Pin<Box<dyn AsyncReadSeek + Send>>>;
+    fn read_exact(&mut self, file_idx: usize, offset: u64, buf: &mut [u8]) -> anyhow::Result<bool>;
 }

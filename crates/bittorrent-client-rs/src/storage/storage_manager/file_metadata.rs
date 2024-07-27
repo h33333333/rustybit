@@ -3,12 +3,12 @@ use std::path::Path;
 use crate::{parser::Info, storage::FileInfo, Error, Result};
 
 #[derive(Debug)]
-pub(super) struct TorrentFileMetadata {
-    pub(super) file_infos: Vec<FileInfo>,
+pub struct TorrentFileMetadata {
+    pub file_infos: Vec<FileInfo>,
 }
 
 impl TorrentFileMetadata {
-    pub(super) fn new(info: &mut Info, base_path: &Path) -> Result<Self> {
+    pub fn new(info: &mut Info, base_path: &Path) -> Result<Self> {
         let mut file_infos = Vec::with_capacity(1);
         if let Some(files) = info.files.as_deref_mut() {
             file_infos.reserve(files.len());

@@ -1,189 +1,85 @@
-use std::{future::Future, io::SeekFrom, sync::Arc};
+use std::io::Write;
 
 use anyhow::Context;
-use sha1::{Digest, Sha1};
-use tokio::{
-    io::{AsyncReadExt, AsyncSeekExt},
-    sync::RwLock,
-    task::JoinSet,
-};
 
 use crate::util::piece_size_from_idx;
 
-use super::{util::find_file_offsets_for_data, FileInfo, Storage};
+use super::{
+    util::{find_file_offsets_for_data, read_data_from_files},
+    FileInfo, Storage,
+};
 
-const MAX_VERIFICATION_MEMORY_USAGE_B: usize = 256_000_000;
-
-pub(super) struct PieceHashVerifier {
-    storage: Arc<RwLock<dyn Storage + Send + Sync>>,
+pub struct PieceHashVerifier {
     piece_length: usize,
-    max_parallel_hashing_tasks: usize,
+    buf: Vec<u8>,
 }
 
 impl PieceHashVerifier {
-    pub(super) fn new(piece_length: usize, storage: Arc<RwLock<dyn Storage + Send + Sync>>) -> Self {
-        let max_parallel_hashing_tasks = 2.max(MAX_VERIFICATION_MEMORY_USAGE_B / piece_length);
-
+    pub fn new(piece_length: usize) -> Self {
         PieceHashVerifier {
-            storage,
             piece_length,
-            max_parallel_hashing_tasks,
+            buf: vec![0; piece_length],
         }
     }
 
-    pub(super) async fn check_all_pieces(
-        &self,
+    pub fn check_all_pieces(
+        &mut self,
+        storage: &mut dyn Storage,
         file_infos: &[FileInfo],
         piece_hashes: &[[u8; 20]],
         torrent_length: usize,
     ) -> anyhow::Result<Option<u32>> {
-        let mut current_piece_idx = 0;
         let number_of_pieces = piece_hashes.len();
-
-        let mut piece_hash_verification_tasks = JoinSet::new();
-        while piece_hash_verification_tasks.len() < self.max_parallel_hashing_tasks
-            && current_piece_idx < try_into!(number_of_pieces, u32)?
-        {
-            let expected_hash = *piece_hashes
-                .get(try_into!(current_piece_idx, usize)?)
-                .with_context(|| {
-                    format!(
-                        "bug: no hash for a piece: idx {}, total hashes {}",
-                        current_piece_idx,
-                        piece_hashes.len()
-                    )
-                })?;
-
-            piece_hash_verification_tasks.spawn(self.verify_piece_hash(
-                file_infos,
-                current_piece_idx,
-                number_of_pieces,
-                torrent_length,
-                expected_hash,
-            )?);
-
-            current_piece_idx += 1;
+        for piece_idx in 0..try_into!(number_of_pieces, u32)? {
+            let expected_piece_hash = piece_hashes
+                .get(try_into!(piece_idx, usize)?)
+                .context("bug: piece with no hash")?;
+            if !self
+                .verify_piece_hash(
+                    storage,
+                    file_infos,
+                    piece_idx,
+                    number_of_pieces,
+                    torrent_length,
+                    expected_piece_hash,
+                )
+                .context("piece hash verification failed")?
+            {
+                return Ok(Some(piece_idx));
+            };
         }
 
-        let mut smallest_failining_piece = None;
-        while let Some(result) = piece_hash_verification_tasks.join_next().await {
-            match result.context("bug: piece hash verification task panicked?")? {
-                Ok((piece_idx, is_valid)) => {
-                    if !is_valid {
-                        match smallest_failining_piece {
-                            Some(current_failing_piece_idx) => {
-                                let new_smallest_failing_piece = if piece_idx < current_failing_piece_idx {
-                                    piece_idx
-                                } else {
-                                    current_failing_piece_idx
-                                };
-                                smallest_failining_piece = Some(new_smallest_failing_piece);
-                            }
-                            None => {
-                                smallest_failining_piece = Some(piece_idx);
-                            }
-                        }
-                    }
-
-                    if smallest_failining_piece.is_none() && current_piece_idx < try_into!(number_of_pieces, u32)? {
-                        let expected_hash =
-                            *piece_hashes
-                                .get(try_into!(current_piece_idx, usize)?)
-                                .with_context(|| {
-                                    format!(
-                                        "bug: no hash for a piece: idx {}, total hashes {}",
-                                        current_piece_idx,
-                                        piece_hashes.len()
-                                    )
-                                })?;
-
-                        piece_hash_verification_tasks.spawn(self.verify_piece_hash(
-                            file_infos,
-                            current_piece_idx,
-                            number_of_pieces,
-                            torrent_length,
-                            expected_hash,
-                        )?);
-
-                        current_piece_idx += 1;
-                    }
-                }
-                Err(e) => {
-                    piece_hash_verification_tasks.abort_all();
-                    return Err(e.context("piece hashing task"));
-                }
-            }
-        }
-
-        Ok(smallest_failining_piece)
+        Ok(None)
     }
 
     pub(super) fn verify_piece_hash(
-        &self,
+        &mut self,
+        storage: &mut dyn Storage,
         file_infos: &[FileInfo],
         piece_idx: u32,
         number_of_pieces: usize,
         torrent_length: usize,
-        expected_hash: [u8; 20],
-    ) -> anyhow::Result<impl Future<Output = anyhow::Result<(u32, bool)>>> {
+        expected_hash: &[u8; 20],
+    ) -> anyhow::Result<bool> {
         let expected_piece_length =
             piece_size_from_idx(number_of_pieces, torrent_length, self.piece_length, piece_idx)?;
-        let file_offsets = find_file_offsets_for_data(
-            file_infos,
-            piece_idx,
-            try_into!(self.piece_length, u64)?,
-            expected_piece_length,
-            None,
-        )
-        .context("error while finding offsets for a piece")?
-        .context("bug: failed to find a matching file for a piece?")?;
+        let file_offsets = find_file_offsets_for_data(file_infos, piece_idx, try_into!(self.piece_length, u64)?, None)
+            .context("error while finding offsets for a piece")?
+            .context("bug: failed to find a matching file for a piece?")?;
 
-        let storage = self.storage.clone();
-        Ok(async move {
-            let lfile_bytes_to_read = try_into!(file_offsets.lfile_bytes, usize)?;
+        let had_enough_bytes =
+            read_data_from_files(storage, &mut self.buf, file_offsets, file_infos, expected_piece_length)
+                .context("error while reading piece from files")?;
 
-            let mut lfile = storage
-                .read()
-                .await
-                .get_ro_file(file_offsets.file_idx)
-                .context("error while getting a R/O file")?;
-
-            lfile
-                .seek(SeekFrom::Start(file_offsets.offset_into_file))
-                .await
-                .context("error while seeking a piece's position in file")?;
-
-            let mut piece = vec![0; expected_piece_length];
-            if let Err(e) = lfile.read_exact(&mut piece[..lfile_bytes_to_read]).await {
-                match e.kind() {
-                    std::io::ErrorKind::UnexpectedEof => {}
-                    _ => anyhow::bail!("error while reading pice from a file: {}", e),
-                }
-            }
-
-            if file_offsets.rfile_bytes > 0 {
-                let mut rfile = storage
-                    .read()
-                    .await
-                    .get_ro_file(file_offsets.file_idx + 1)
-                    .context("error while getting a R/O file")?;
-
-                if let Err(e) = rfile
-                    .read_exact(&mut piece[lfile_bytes_to_read..expected_piece_length])
-                    .await
-                {
-                    match e.kind() {
-                        std::io::ErrorKind::UnexpectedEof => {}
-                        _ => anyhow::bail!("error while reading pice from a file: {}", e),
-                    }
-                }
-            }
-
-            let mut hasher = Sha1::new();
-            hasher.update(&piece);
-            let calculated_hash: [u8; 20] = hasher.finalize().into();
-
-            Ok((piece_idx, calculated_hash == expected_hash))
-        })
+        if !had_enough_bytes {
+            // Skip hash verification, as it would fail inevitably
+            Ok(false)
+        } else {
+            let mut hasher = crypto_hash::Hasher::new(crypto_hash::Algorithm::SHA1);
+            hasher.write_all(&self.buf).context("error while updating hasher")?;
+            let mut calculated_hash = [0u8; 20];
+            calculated_hash.copy_from_slice(&hasher.finish());
+            Ok(&calculated_hash == expected_hash)
+        }
     }
 }

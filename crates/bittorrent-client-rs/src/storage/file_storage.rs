@@ -1,37 +1,48 @@
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
+use std::io::ErrorKind;
+use std::os::unix::fs::FileExt;
+use std::path::PathBuf;
 
 use anyhow::Context;
 
-use super::{AsyncReadSeek, Storage};
+use super::{FileInfo, Storage};
 
 pub struct FileStorage {
     files: Vec<(PathBuf, File)>,
 }
 
 impl FileStorage {
-    pub fn new(paths: &[(&Path, u64)]) -> anyhow::Result<Self> {
+    pub fn new(paths: &[FileInfo]) -> anyhow::Result<Self> {
         let mut files = Vec::with_capacity(paths.len());
-        for (path, file_len) in paths.iter() {
+        for file_info in paths.iter() {
             std::fs::create_dir_all(
-                path.parent()
-                    .with_context(|| format!("bug: a file with no parrent? {:?}", path))?,
+                file_info
+                    .path
+                    .parent()
+                    .with_context(|| format!("bug: a file with no parrent? {:?}", file_info.path))?,
             )
-            .with_context(|| format!("error while creating parent directories for a file: {:?}", path))?;
+            .with_context(|| {
+                format!(
+                    "error while creating parent directories for a file: {:?}",
+                    file_info.path
+                )
+            })?;
             let f = std::fs::OpenOptions::new()
                 .create(true)
                 .truncate(false)
                 .write(true)
                 .read(true)
-                .open(path)
-                .with_context(|| format!("error while opening/creating a file: {path:?}"))?;
+                .open(&file_info.path)
+                .with_context(|| format!("error while opening/creating a file: {:?}", file_info.path))?;
 
-            f.set_len(*file_len)
-                .with_context(|| format!("error while setting the file's length: {path:?}, {file_len}"))?;
+            f.set_len(file_info.length).with_context(|| {
+                format!(
+                    "error while setting the file's length: {:?}, {}",
+                    file_info.path, file_info.length
+                )
+            })?;
 
-            files.push((path.to_path_buf(), f));
+            files.push((file_info.path.clone(), f));
         }
         Ok(FileStorage { files })
     }
@@ -45,42 +56,26 @@ impl Storage for FileStorage {
             .get(file_idx)
             .map(|(_, file)| file)
             .context("bug: non-existing file index?")?;
-        file.seek(SeekFrom::Start(offset))
-            .context("error while seeking the provided offset")?;
-        file.write_all(buf).context("error while writing to file")?;
+        file.write_all_at(buf, offset)
+            .context("error while writing to the provided offset")?;
 
         Ok(())
     }
 
     #[tracing::instrument(err, skip(self, buf))]
-    fn read_exact(&mut self, file_idx: usize, offset: u64, buf: &mut [u8]) -> anyhow::Result<()> {
+    fn read_exact(&mut self, file_idx: usize, offset: u64, buf: &mut [u8]) -> anyhow::Result<bool> {
         let file = &mut self
             .files
             .get(file_idx)
             .map(|(_, file)| file)
             .context("bug: non-existing file index?")?;
-        file.seek(SeekFrom::Start(offset))
-            .context("error while seeking the provided offset")?;
-        file.read_exact(buf).context("error while reading from file")?;
+        if let Err(e) = file.read_exact_at(buf, offset) {
+            match e.kind() {
+                ErrorKind::UnexpectedEof => return Ok(false),
+                _ => return Err(e).context("error while reading from file at the offset"),
+            }
+        };
 
-        Ok(())
-    }
-
-    #[tracing::instrument(err, skip(self))]
-    fn get_ro_file(&self, file_idx: usize) -> anyhow::Result<Pin<Box<dyn AsyncReadSeek + Send>>> {
-        let file_path = self
-            .files
-            .get(file_idx)
-            .map(|(path, _)| path)
-            .context("bug: non-existing file index?")?;
-
-        let file = tokio::fs::File::from_std(
-            std::fs::OpenOptions::new()
-                .read(true)
-                .open(file_path)
-                .context("error while opening a RO file")?,
-        );
-
-        Ok(Box::pin(file) as Pin<Box<dyn AsyncReadSeek + Send>>)
+        Ok(true)
     }
 }

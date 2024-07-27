@@ -1,8 +1,9 @@
+use std::io::Write;
+
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_bencode::ser;
 use serde_with::{serde_as, Bytes};
-use sha1::{Digest, Sha1};
 
 /// Multiple File Mode info
 #[derive(Debug, Serialize, Deserialize)]
@@ -47,8 +48,13 @@ impl Info {
     /// SHA1 Hash of bencoded self
     pub fn hash(&self) -> anyhow::Result<[u8; 20]> {
         let serialized_struct = ser::to_bytes(self).context("serializing torrent's Info failed")?;
-        let hasher = Sha1::new_with_prefix(serialized_struct);
-        Ok(hasher.finalize().into())
+        let mut hasher = crypto_hash::Hasher::new(crypto_hash::Algorithm::SHA1);
+        hasher
+            .write_all(&serialized_struct)
+            .context("error while updating the hasher")?;
+        let mut resulting_hash = [0u8; 20];
+        resulting_hash.copy_from_slice(&hasher.finish());
+        Ok(resulting_hash)
     }
 }
 

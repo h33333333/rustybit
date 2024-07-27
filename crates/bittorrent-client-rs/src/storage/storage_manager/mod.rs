@@ -1,22 +1,21 @@
 mod file_metadata;
 
-use std::{net::SocketAddrV4, path::Path, sync::Arc};
+use std::net::SocketAddrV4;
 
-use file_metadata::TorrentFileMetadata;
+pub use file_metadata::TorrentFileMetadata;
 
 use anyhow::Context;
 use bittorrent_peer_protocol::Block;
-use tokio::sync::{mpsc, RwLock};
-
-use crate::parser::Info;
+use tokio::sync::mpsc;
 
 use super::{
-    file_storage::FileStorage, piece_hash_verifier::PieceHashVerifier, util::find_file_offsets_for_data, Storage,
-    StorageOp,
+    piece_hash_verifier::PieceHashVerifier,
+    util::{find_file_offsets_for_data, write_data_to_files},
+    Storage, StorageOp,
 };
 
-pub struct StorageManager {
-    storage: Arc<RwLock<dyn Storage + Send + Sync>>,
+pub struct StorageManager<'a> {
+    storage: &'a mut dyn Storage,
     piece_hash_verifier: PieceHashVerifier,
     file_metadata: TorrentFileMetadata,
     piece_length: u64,
@@ -24,41 +23,43 @@ pub struct StorageManager {
     total_torrent_length: usize,
 }
 
-impl StorageManager {
-    pub fn new(torrent_info: &mut Info, base_path: &Path, total_torrent_length: u64) -> anyhow::Result<StorageManager> {
-        let torrent_mode = TorrentFileMetadata::new(torrent_info, base_path)?;
-
-        let paths = torrent_mode
-            .file_infos
-            .iter()
-            .map(|file_info| (file_info.path.as_path(), file_info.length))
-            .collect::<Vec<(&Path, u64)>>();
-
-        let storage: Arc<RwLock<dyn Storage + Send + Sync>> = Arc::new(RwLock::new(
-            FileStorage::new(&paths).context("error while creating an FS backend")?,
-        ));
-
-        let piece_hash_verifier = PieceHashVerifier::new(try_into!(torrent_info.piece_length, usize)?, storage.clone());
-
+impl<'a> StorageManager<'a> {
+    pub fn new(
+        storage: &'a mut dyn Storage,
+        file_metadata: TorrentFileMetadata,
+        piece_length: u64,
+        piece_hash_verifier: PieceHashVerifier,
+        number_of_pieces: usize,
+        total_torrent_length: u64,
+    ) -> anyhow::Result<Self> {
         Ok(StorageManager {
             storage,
             piece_hash_verifier,
-            file_metadata: torrent_mode,
-            piece_length: torrent_info.piece_length,
-            number_of_pieces: torrent_info.pieces.len() / 20,
+            file_metadata,
+            piece_length,
+            number_of_pieces,
             total_torrent_length: try_into!(total_torrent_length, usize)?,
         })
     }
 
     pub async fn checksum_verification(&mut self, piece_hashes: &[[u8; 20]]) -> anyhow::Result<Option<u32>> {
-        self.piece_hash_verifier
+        tracing::info!("Starting checksum verification");
+        let starting_piece = self
+            .piece_hash_verifier
             .check_all_pieces(
+                self.storage,
                 self.file_metadata.file_infos.as_slice(),
                 piece_hashes,
                 self.total_torrent_length,
             )
-            .await
-            .context("verifying pieces failed")
+            .context("checksum verification failed")?;
+        if let Some(starting_piece_idx) = starting_piece {
+            tracing::info!(%starting_piece_idx, "Finished checksum verification, found a starting piece");
+        } else {
+            tracing::info!("Finished checksum verification, all files were already downloaded");
+        };
+
+        Ok(starting_piece)
     }
 
     pub async fn listen_for_blocks(
@@ -73,54 +74,28 @@ impl StorageManager {
                         &self.file_metadata.file_infos,
                         index,
                         self.piece_length,
-                        block.len(),
                         Some(begin),
                     )
                     .context("error while finding offsets for a block")?
                     .context("bug: failed to find a matching file for a block?")?;
 
-                    let lfile_bytes = try_into!(file_offsets.lfile_bytes, usize)?;
-                    self.storage
-                        .write()
-                        .await
-                        .write_all(
-                            file_offsets.file_idx,
-                            file_offsets.offset_into_file,
-                            &block[0..lfile_bytes],
-                        )
-                        .with_context(|| {
-                            format!(
-                                "error while writing a block to the file: file index {}, piece index {}, offset {}",
-                                file_offsets.file_idx, index, begin
-                            )
-                        })?;
-
-                    if file_offsets.rfile_bytes > 0 {
-                        self.storage.write().await
-                                .write_all(file_offsets.file_idx + 1, 0, &block[lfile_bytes..])
-                                .with_context(|| {
-                                    format!(
-                                    "error while writing a block that crosses file boundary to the rightmost file: file index {}, piece index {}, offset {}",
-                                    file_offsets.file_idx + 1, index, begin
-                                )
-                                })?;
-                    }
+                    write_data_to_files(self.storage, &block, file_offsets, &self.file_metadata.file_infos)
+                        .context("error while writing block to files")?;
                 }
                 StorageOp::CheckPieceHash((peer_addr, piece_idx, expected_hash)) => {
-                    let (_, is_correct) = self
+                    let verification_result = self
                         .piece_hash_verifier
                         .verify_piece_hash(
+                            self.storage,
                             self.file_metadata.file_infos.as_slice(),
                             piece_idx,
                             self.number_of_pieces,
                             self.total_torrent_length,
-                            expected_hash,
+                            &expected_hash,
                         )
-                        .context("error while creating a piece hash verifier task")?
-                        .await
                         .context("error while verifying piece hash")?;
 
-                    tx.send((peer_addr, piece_idx, is_correct))
+                    tx.send((peer_addr, piece_idx, verification_result))
                         .await
                         .context("error sending piece hash verification result")?;
                 }
