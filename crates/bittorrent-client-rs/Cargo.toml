@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 bittorrent-peer-protocol.workspace = true
 leechy-dht.workspace = true
+serde_bencode.workspace = true
 clap = { version = "4.3.14", features = ["derive"] }
 tokio = { version = "1", features = [
     "fs",
@@ -15,7 +16,6 @@ tokio = { version = "1", features = [
     "rt-multi-thread",
 ] }
 serde = { version = "1.0", features = ["derive"] }
-serde_bencode = "^0.2.3"
 thiserror = "1.0"
 serde_with = "3.1.0"
 rand = "0.8.5"
@@ -35,3 +35,4 @@ anyhow = "^1.0.8"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 crypto-hash = "^0.3"
+serde_bytes = "0.11.15"

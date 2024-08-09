@@ -1,12 +1,11 @@
 use std::fs;
 use std::io::Read;
 use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
 use bittorrent_client_rs::logging::setup_logger;
-use bittorrent_client_rs::stats::{Stats, CONNECTING_PEERS, NUMBER_OF_PEERS};
+use bittorrent_client_rs::stats::Stats;
 use bittorrent_client_rs::tracker::TrackerRequest;
 use bittorrent_client_rs::util::generate_peer_id;
 use bittorrent_client_rs::{args, handle_peer, parser, torrent_meta::TorrentMeta, tracker, try_into, StorageManager};
@@ -39,8 +38,14 @@ fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
     Ok(url)
 }
 
-// TODO: implement DHT?
 // TODO: global code refactoring/restructuring
+// TODO: make stats respect starting piece
+// TODO: slow speed build up. Can I improve it more?
+// TODO: Improve DHT
+//    - make it find peers faster
+//    - send request not only to nodes but to peers?
+// TODO: improve last pieces downloading speed
+// TODO: improve exiting after downloading a torrent (can be stuck requesting more peers)
 
 #[tokio::main]
 #[tracing::instrument(err)]
@@ -102,12 +107,29 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let peer_id = try_into!(peer_id.as_bytes(), [u8; 20])?;
+
+    let pieces_total = meta_info.info.pieces.len() / 20;
+    let piece_length = meta_info.info.piece_length;
+    let info_hash = meta_info.info.hash()?;
+    let splitted_piece_hashes = meta_info
+        .info
+        .pieces
+        .chunks(20)
+        .map(|item| try_into!(item, [u8; 20]))
+        .collect::<Result<Vec<[u8; 20]>>>()?;
+    let file_metadata = {
+        let mut base_path = fs::canonicalize(".")?;
+        // TODO: make this a CLI arg
+        base_path.push("downloads");
+
+        // Multi-file mode: add directory name
+        if meta_info.info.files.is_some() {
+            base_path.push(&*meta_info.info.name);
+        }
+        TorrentFileMetadata::new(&mut meta_info.info, &base_path).context("bug: bad metadata")?
+    };
+
     let root_handle = tokio::spawn(async move {
-        let pieces_total = meta_info.info.pieces.len() / 20;
-        let piece_length = meta_info.info.piece_length;
-
-        let info_hash = meta_info.info.hash()?;
-
         let (peer_event_tx, peer_event_rx) = unbounded_channel();
 
         let (new_peer_tx, new_peer_rx) = unbounded_channel();
@@ -120,27 +142,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .context("TorrentMeta")?;
 
-        let mut base_path = fs::canonicalize(".")?;
-        // TODO: make this a CLI arg
-        base_path.push("downloads");
-
-        // Multi-file mode: add directory name
-        if meta_info.info.files.is_some() {
-            base_path.push(&meta_info.info.name);
-        }
-
         let (storage_tx, storage_rx) = mpsc::channel(200);
-        let file_metadata = TorrentFileMetadata::new(&mut meta_info.info, &base_path).context("bug: bad metadata")?;
         let mut storage =
             FileStorage::new(&file_metadata.file_infos).context("error while creating a file-based storage")?;
         let mut piece_hash_verifier = PieceHashVerifier::new(try_into!(piece_length, usize)?);
-
-        let splitted_piece_hashes = meta_info
-            .info
-            .pieces
-            .chunks(20)
-            .map(|item| try_into!(item, [u8; 20]))
-            .collect::<Result<Vec<[u8; 20]>>>()?;
 
         tracing::info!("Starting initial checksum verification");
         let starting_piece = match piece_hash_verifier
@@ -169,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
                 let mut storage_manager = StorageManager::new(
                     &mut storage as &mut dyn Storage,
                     file_metadata,
-                    meta_info.info.piece_length,
+                    piece_length,
                     piece_hash_verifier,
                     pieces_total,
                     length,
@@ -227,18 +232,22 @@ async fn main() -> anyhow::Result<()> {
                     ));
                 };
 
+                let mut peers = 0;
                 let mut peer_handler_tasks = JoinSet::new();
                 // Process all initial peers
                 for peer_address in peers_c.into_iter() {
                     spawn_peer(&mut peer_handler_tasks, peer_address);
+                    peers += 1;
                 }
 
                 loop {
                     tokio::select! {
-                        Some(next_peer) = peer_queue_rx.recv(), if CONNECTING_PEERS.load(Ordering::Relaxed) < 25 && NUMBER_OF_PEERS.load(Ordering::Relaxed) < 40 => {
-                            spawn_peer(&mut peer_handler_tasks, next_peer)
+                        Some(next_peer) = peer_queue_rx.recv(), if peers < 90 => {
+                            spawn_peer(&mut peer_handler_tasks, next_peer);
+                            peers +=1;
                         },
                         Some(peer_handler_result) = peer_handler_tasks.join_next() => {
+                            peers -= 1;
                             if let Err(e) = peer_handler_result.context("peer handler task")? {
                                 tracing::error!("an error happened in the peer: {:#}", e);
                             }

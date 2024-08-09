@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{ops::Deref, path::Path};
 
 use crate::{parser::Info, storage::FileInfo, Error, Result};
 
@@ -10,19 +10,19 @@ pub struct TorrentFileMetadata {
 impl TorrentFileMetadata {
     pub fn new(info: &mut Info, base_path: &Path) -> Result<Self> {
         let mut file_infos = Vec::with_capacity(1);
-        if let Some(files) = info.files.as_deref_mut() {
+        if let Some(files) = info.files.as_deref() {
             file_infos.reserve(files.len());
-            for file in files.iter_mut() {
+            for file in files.iter() {
                 let mut path = base_path.to_path_buf();
                 file.path.iter().for_each(|path_part| {
-                    path.push(path_part);
+                    path.push(path_part.deref());
                 });
 
                 file_infos.push(FileInfo::new(path, file.length));
             }
         } else {
             let mut path = base_path.to_path_buf();
-            path.push(&info.name);
+            path.push(&*info.name);
 
             let length = info.length.ok_or_else(|| {
                 Error::InternalError(

@@ -1,5 +1,4 @@
 use crate::state::torrent::PieceState;
-use crate::stats::CONNECTING_PEERS;
 use crate::torrent_meta::TorrentMeta;
 use crate::util::piece_size_from_idx;
 use crate::{Elapsed, TorrentSharedState, WithTimeout, DEFAULT_BLOCK_SIZE};
@@ -9,7 +8,6 @@ use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
 use std::collections::VecDeque;
 use std::net::SocketAddrV4;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -31,7 +29,6 @@ pub async fn handle_peer(
     tx: mpsc::UnboundedSender<(SocketAddrV4, PeerEvent)>,
     new_peer_req_tx: mpsc::UnboundedSender<(SocketAddrV4, mpsc::Sender<TorrentManagerReq>)>,
 ) -> anyhow::Result<()> {
-    CONNECTING_PEERS.fetch_add(1, Ordering::Relaxed);
     let mut stream = TcpStream::connect(peer_addr)
         .with_timeout("peer connect", Duration::from_secs(5))
         .await
@@ -63,8 +60,6 @@ pub async fn handle_peer(
         .context("error while registering a new peer with the manager")?;
 
     tracing::trace!("handshakes done, starting a peer handling task");
-
-    CONNECTING_PEERS.fetch_sub(1, Ordering::Relaxed);
 
     let clonex_tx = tx.clone();
     let task_handle = tokio::spawn(async move {

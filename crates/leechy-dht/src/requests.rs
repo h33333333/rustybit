@@ -1,11 +1,11 @@
-use serde::{de::Visitor, Deserialize, Deserializer, Serialize};
-use std::{fmt::Debug, marker::PhantomData};
+use serde::{Deserialize, Serialize};
+use std::{borrow::Cow, fmt::Debug};
 
-pub trait KrpcQueryMessage {
-    type ResponseType: KrpcResponseMessage;
+pub trait KrpcQueryMessage<'a> {
+    type ResponseType: KrpcResponseMessage<'a>;
 }
 
-pub trait KrpcResponseMessage {}
+pub trait KrpcResponseMessage<'a> {}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GetPeersQueryMessage {
@@ -15,53 +15,22 @@ pub struct GetPeersQueryMessage {
     pub info_hash: [u8; 20],
 }
 
-impl KrpcQueryMessage for GetPeersQueryMessage {
-    type ResponseType = GetPeersResponse;
+impl<'a> KrpcQueryMessage<'a> for GetPeersQueryMessage {
+    type ResponseType = GetPeersResponse<'a>;
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct GetPeersResponse {
-    #[serde(default)]
-    // #[serde(with = "serde_bytes", default)]
-    pub values: Option<Vec<CompactPeerInfo>>,
-    #[serde(with = "serde_bytes", default)]
-    pub nodes: Option<Vec<u8>>,
+pub struct GetPeersResponse<'a> {
+    #[serde(default, borrow)]
+    pub values: Option<Cow<'a, [CompactPeerInfo<'a>]>>,
+    #[serde(with = "serde_bytes", default, borrow)]
+    pub nodes: Option<Cow<'a, [u8]>>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
-pub struct CompactPeerInfo(pub [u8; 6]);
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
+pub struct CompactPeerInfo<'a>(#[serde(with = "serde_bytes", borrow)] pub Cow<'a, [u8]>);
 
-impl<'de> Deserialize<'de> for CompactPeerInfo {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct PeerInfoVisitor {}
-        impl<'de> Visitor<'de> for PeerInfoVisitor {
-            type Value = CompactPeerInfo;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a byte array")
-            }
-
-            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                if v.len() != 6 {
-                    return Err(serde::de::Error::invalid_length(v.len(), &"slice of length 6"));
-                }
-                let peer_info = TryInto::<[u8; 6]>::try_into(v).map_err(serde::de::Error::custom)?;
-
-                Ok(CompactPeerInfo(peer_info))
-            }
-        }
-
-        deserializer.deserialize_bytes(PeerInfoVisitor {})
-    }
-}
-
-impl KrpcResponseMessage for GetPeersResponse {}
+impl<'a> KrpcResponseMessage<'a> for GetPeersResponse<'a> {}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PingQueryMessage {
@@ -69,7 +38,7 @@ pub struct PingQueryMessage {
     pub id: [u8; 20],
 }
 
-impl<'a> KrpcQueryMessage for PingQueryMessage {
+impl<'a> KrpcQueryMessage<'a> for PingQueryMessage {
     type ResponseType = PingResponse;
 }
 
@@ -79,29 +48,30 @@ pub struct PingResponse {
     pub id: [u8; 20],
 }
 
-impl KrpcResponseMessage for PingResponse {}
+impl<'a> KrpcResponseMessage<'a> for PingResponse {}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct KrpcMessage<M = GetPeersQueryMessage>
+pub struct KrpcMessage<'a, M = GetPeersQueryMessage>
 where
-    M: KrpcQueryMessage + Debug + PartialEq + Eq,
+    M: KrpcQueryMessage<'a> + Debug + PartialEq + Eq,
     M::ResponseType: Serialize + Debug + PartialEq + Eq,
 {
     #[serde(rename = "t")]
-    #[serde(with = "serde_bytes")]
-    pub(crate) transaction_id: [u8; 2],
-    #[serde(flatten)]
-    #[serde(bound(deserialize = "M: Deserialize<'de>, M::ResponseType: Deserialize<'de>"))]
-    pub(crate) message_type: KrpcMessageType<M>,
+    pub(crate) transaction_id: Cow<'a, str>,
+    #[serde(
+        flatten,
+        borrow,
+        bound(deserialize = "M: Deserialize<'de>, M::ResponseType: Deserialize<'de>")
+    )]
+    pub(crate) message_type: KrpcMessageType<'a, M>,
 }
-
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "y")]
-pub enum KrpcMessageType<M: KrpcQueryMessage> {
+pub enum KrpcMessageType<'a, M: KrpcQueryMessage<'a>> {
     #[serde(rename = "q")]
     Query {
         #[serde(rename = "q")]
-        name: String,
+        name: Cow<'a, str>,
         #[serde(rename = "a")]
         query: M,
     },
@@ -112,28 +82,28 @@ pub enum KrpcMessageType<M: KrpcQueryMessage> {
     },
     #[serde(rename = "e")]
     Error {
-        #[serde(rename = "e")]
-        error: ErrorMsg,
+        #[serde(rename = "e", borrow)]
+        error: ErrorMsg<'a>,
     },
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ErrorMsg {
-    #[serde(rename = "e")]
-    errors: Vec<(u16, String)>,
+pub struct ErrorMsg<'a> {
+    #[serde(rename = "e", borrow)]
+    errors: Cow<'a, [(u16, Cow<'a, str>)]>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::{GetPeersQueryMessage, KrpcMessage, KrpcMessageType};
-    use crate::requests::GetPeersResponse;
+    use crate::requests::{CompactPeerInfo, ErrorMsg, GetPeersResponse};
 
     #[test]
     fn get_peers_roundtrip_test() {
         let query_message = KrpcMessage {
-            transaction_id: [1, 2],
+            transaction_id: "123".into(),
             message_type: KrpcMessageType::Query {
-                name: "get_peers".to_string(),
+                name: "get_peers".into(),
                 query: GetPeersQueryMessage {
                     id: [0; 20],
                     info_hash: [1; 20],
@@ -151,17 +121,22 @@ mod tests {
 
     #[test]
     fn get_peers_resp_roundtrip_test() {
+        let peer_info = vec![CompactPeerInfo(b"test".into())];
+        let nodes = b"big node";
+
         let query_resp_message = KrpcMessage {
-            transaction_id: [0, 1],
+            transaction_id: "123".into(),
             message_type: KrpcMessageType::Response {
                 response: GetPeersResponse {
-                    values: Some(vec![0, 1, 2, 3]),
-                    nodes: Some(vec![4, 5, 6, 7]),
+                    values: Some((&peer_info).into()),
+                    nodes: Some(nodes.as_ref().into()),
                 },
             },
         };
 
         let ser_result = serde_bencode::to_string(&query_resp_message).expect("serialization failed");
+
+        dbg!(&ser_result);
 
         let deserialized_query_resp_message =
             serde_bencode::from_str::<KrpcMessage>(&ser_result).expect("deserialization failed");

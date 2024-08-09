@@ -8,7 +8,7 @@ pub type Result<T> = result::Result<T, Error>;
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("error while parsing the torrent file: {0}")]
-    ParsingError(#[from] serde_bencode::error::Error),
+    ParsingError(#[from] serde_bencode::Error),
     #[error(transparent)]
     IoError(#[from] std::io::Error),
     #[error("an error happened: {0}")]

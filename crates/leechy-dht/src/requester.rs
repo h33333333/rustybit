@@ -1,8 +1,7 @@
-use crate::requests::{GetPeersQueryMessage, KrpcMessage, KrpcMessageType, PingQueryMessage};
-use crate::util::generate_string;
+use crate::requests::{GetPeersQueryMessage, KrpcMessage, KrpcMessageType};
 use anyhow::Context;
-use serde::{Deserialize, Deserializer};
-use std::marker::PhantomData;
+use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
+use std::num::NonZeroU32;
 use std::{
     collections::VecDeque,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
@@ -15,8 +14,7 @@ use tokio::{
 };
 
 const DEFAULT_BUF_SIZE: usize = 65_536;
-const MAX_INFLIGHT_REQUESTS: usize = 10;
-const INFLIGHT_REQUEST_TIMEOUT_SECS: f64 = 5.;
+const INFLIGHT_REQUEST_TIMEOUT_SECS: f64 = 1.;
 
 #[derive(Debug)]
 pub struct DhtRequester {
@@ -26,6 +24,7 @@ pub struct DhtRequester {
     processed_nodes: Vec<SocketAddrV4>,
     seen_peers: Vec<Ipv4Addr>,
     inflight_requests: VecDeque<(Instant, SocketAddrV4)>,
+    rate_limiter: DefaultDirectRateLimiter,
 }
 
 impl DhtRequester {
@@ -37,9 +36,9 @@ impl DhtRequester {
         let node_queue = VecDeque::from(bootstrap_node_addrs);
 
         let message = KrpcMessage {
-            transaction_id: [0, 0],
+            transaction_id: "010".into(),
             message_type: KrpcMessageType::Query {
-                name: "get_peers".to_string(),
+                name: "get_peers".into(),
                 query: GetPeersQueryMessage {
                     // TODO: generate properly
                     id: info_hash,
@@ -48,8 +47,11 @@ impl DhtRequester {
             },
         };
 
-        let serialized_message =
-            serde_bencode::to_bytes(&message).context("failed to serialize a get_peers DHT message")?;
+        let rate_limiter = RateLimiter::direct(Quota::per_second(NonZeroU32::new(200).unwrap()));
+
+        let mut serialized_message = Vec::new();
+        serde_bencode::to_writer(&message, &mut serialized_message)
+            .context("failed to serialize a get_peers DHT message")?;
 
         Ok(DhtRequester {
             read_buf: vec![0; DEFAULT_BUF_SIZE],
@@ -58,6 +60,7 @@ impl DhtRequester {
             processed_nodes: Vec::new(),
             inflight_requests: VecDeque::new(),
             seen_peers: Vec::new(),
+            rate_limiter,
         })
     }
 
@@ -69,7 +72,9 @@ impl DhtRequester {
     ) -> anyhow::Result<()> {
         let socket = UdpSocket::bind("0.0.0.0:6881").await.context("binding UDP socket")?;
 
-        let mut request_send_interval = tokio::time::interval(Duration::from_secs(1));
+        let mut request_cleanup_interval =
+            tokio::time::interval(Duration::from_secs_f64(INFLIGHT_REQUEST_TIMEOUT_SECS));
+
         loop {
             tokio::select! {
                 result = socket.recv_from(&mut self.read_buf) => {
@@ -120,8 +125,7 @@ impl DhtRequester {
                                     }
 
                                     if let Some(peers) = response.values {
-                                        // for compact_peer_addr in peers.iter().map(|addr| addr.as_bytes()) {
-                                        for compact_peer_addr in peers {
+                                        for compact_peer_addr in peers.iter() {
                                             let ip = TryInto::<[u8; 4]>::try_into(&compact_peer_addr.0[..4]).context("converting IP from slice to array")?;
                                             let port = ((compact_peer_addr.0[4] as u16) << 8) | compact_peer_addr.0[5] as u16;
 
@@ -146,14 +150,20 @@ impl DhtRequester {
                         Err(e) => tracing::error!(addr = %from_node, "An error happened while decoding a message from DHT node: {}", e)
                     }
                 }
-                _ = request_send_interval.tick() => {}
+                _ = self.rate_limiter.until_ready(), if !self.node_queue.is_empty() => {
+                    self
+                        .query_next_node(&socket)
+                        .await
+                        .context("querying next node in the queue")?;
+                }
+                _ = request_cleanup_interval.tick() => {}
                 _ = &mut cancellation => {
                     tracing::debug!("Cancellation requsted. Requester is exiting");
                     break;
                 }
             }
 
-            // Drop the oldest inflight request to allow making new ones
+            // Drop oldest inflight requests to allow making new ones
             if self
                 .inflight_requests
                 .front()
@@ -161,16 +171,6 @@ impl DhtRequester {
             {
                 self.inflight_requests
                     .retain(|(req_time, _)| req_time.elapsed().as_secs_f64() > INFLIGHT_REQUEST_TIMEOUT_SECS);
-            }
-
-            while self.inflight_requests.len() < MAX_INFLIGHT_REQUESTS {
-                if !self
-                    .query_next_node(&socket)
-                    .await
-                    .context("querying next node in the queue")?
-                {
-                    break;
-                }
             }
 
             if self.node_queue.is_empty() && self.inflight_requests.is_empty() {
