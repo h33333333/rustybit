@@ -96,7 +96,7 @@ pub struct ErrorMsg<'a> {
 #[cfg(test)]
 mod tests {
     use super::{GetPeersQueryMessage, KrpcMessage, KrpcMessageType};
-    use crate::requests::{CompactPeerInfo, ErrorMsg, GetPeersResponse};
+    use crate::requests::{CompactPeerInfo, GetPeersResponse};
 
     #[test]
     fn get_peers_roundtrip_test() {

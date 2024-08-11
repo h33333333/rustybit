@@ -16,14 +16,14 @@ pub struct File<'a> {
     /// Each element in the list corresponds to either a directory name or the filename.
     /// "dir1/dir2/file.ext" -> ["dir1", "dir2", "file.ext"]
     #[serde(borrow)]
-    pub path: Cow<'a, [Cow<'a, str>]>,
+    pub path: Vec<Cow<'a, str>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Info<'a> {
     /// A list of Files (Multi File Mode)
-    #[serde(default, skip_serializing_if = "Option::is_none", borrow)]
-    pub files: Option<Cow<'a, [File<'a>]>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<File<'a>>>,
     /// Length of the file in bytes (Single File Mode)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub length: Option<u64>,
@@ -69,7 +69,7 @@ pub struct MetaInfo<'a> {
     /// A list of annouce URLs of trackers. Is used if the multitracker specification is supported
     #[serde(default)]
     #[serde(rename = "announce-list", borrow)]
-    pub announce_list: Option<Cow<'a, [Cow<'a, [Cow<'a, str>]>]>>,
+    pub announce_list: Option<Vec<Vec<Cow<'a, str>>>>,
     /// The creation time of the torrent (UNIX epoch format)
     #[serde(default)]
     #[serde(rename = "creation date")]

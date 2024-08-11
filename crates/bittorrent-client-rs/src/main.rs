@@ -1,11 +1,12 @@
 use std::fs;
 use std::io::Read;
 use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
 use bittorrent_client_rs::logging::setup_logger;
-use bittorrent_client_rs::stats::Stats;
+use bittorrent_client_rs::stats::{Stats, DOWNLOADED_BYTES, DOWNLOADED_PIECES};
 use bittorrent_client_rs::tracker::TrackerRequest;
 use bittorrent_client_rs::util::generate_peer_id;
 use bittorrent_client_rs::{args, handle_peer, parser, torrent_meta::TorrentMeta, tracker, try_into, StorageManager};
@@ -39,7 +40,6 @@ fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
 }
 
 // TODO: global code refactoring/restructuring
-// TODO: make stats respect starting piece
 // TODO: slow speed build up. Can I improve it more?
 // TODO: Improve DHT
 //    - make it find peers faster
@@ -148,24 +148,31 @@ async fn main() -> anyhow::Result<()> {
         let mut piece_hash_verifier = PieceHashVerifier::new(try_into!(piece_length, usize)?);
 
         tracing::info!("Starting initial checksum verification");
-        let starting_piece = match piece_hash_verifier
+        let (verified_pieces, piece_states) = piece_hash_verifier
             .check_all_pieces(
                 &mut storage,
                 &file_metadata.file_infos,
                 &splitted_piece_hashes,
                 try_into!(length, usize)?,
             )
-            .context("error while doing initial checksums verification")?
-        {
-            Some(piece_idx) => piece_idx,
-            None => {
-                tracing::info!("All files were downloaded already, exiting...");
-                return Ok(());
-            }
-        };
-        tracing::info!(%starting_piece, "Finished initial checksum verification, found a starting piece");
+            .context("error while doing initial checksums verification")?;
 
-        let torrent_state = Arc::new(RwLock::new(TorrentSharedState::new(pieces_total, starting_piece)?));
+        if verified_pieces == pieces_total {
+            tracing::info!(%verified_pieces, "Finished initial checksum verification, already downloaded all pieces, exiting...");
+            return Ok(());
+        } else {
+            tracing::info!(%verified_pieces, "Finished initial checksum verification, already downloaded and verified some of the pieces");
+        }
+
+        let (downloaded, left) = {
+            let downloaded_bytes = verified_pieces as u64 * piece_length;
+            let bytes_left = length - downloaded_bytes;
+            (try_into!(downloaded_bytes, usize)?, try_into!(bytes_left, usize)?)
+        };
+        DOWNLOADED_BYTES.store(downloaded, Ordering::Relaxed);
+        DOWNLOADED_PIECES.store(try_into!(verified_pieces, usize)?, Ordering::Relaxed);
+
+        let torrent_state = Arc::new(RwLock::new(TorrentSharedState::new(piece_states, pieces_total)?));
 
         let (torrent_task, storage_task) = {
             let (hash_check_tx, hash_check_rx) = mpsc::channel(200);
@@ -210,7 +217,7 @@ async fn main() -> anyhow::Result<()> {
         let (stats_cancel_tx, stats_cancel_rx) = oneshot::channel();
         let stats_task = {
             let length = try_into!(length, usize).context("starting a stats task")?;
-            let mut stats = Stats::new(0, length, length);
+            let mut stats = Stats::new(downloaded, left, length);
             tokio::spawn(async move { stats.collect_stats(stats_cancel_rx).await })
         };
 

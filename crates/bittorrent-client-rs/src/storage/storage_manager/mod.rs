@@ -42,26 +42,6 @@ impl<'a> StorageManager<'a> {
         })
     }
 
-    pub async fn checksum_verification(&mut self, piece_hashes: &[[u8; 20]]) -> anyhow::Result<Option<u32>> {
-        tracing::info!("Starting checksum verification");
-        let starting_piece = self
-            .piece_hash_verifier
-            .check_all_pieces(
-                self.storage,
-                self.file_metadata.file_infos.as_slice(),
-                piece_hashes,
-                self.total_torrent_length,
-            )
-            .context("checksum verification failed")?;
-        if let Some(starting_piece_idx) = starting_piece {
-            tracing::info!(%starting_piece_idx, "Finished checksum verification, found a starting piece");
-        } else {
-            tracing::info!("Finished checksum verification, all files were already downloaded");
-        };
-
-        Ok(starting_piece)
-    }
-
     pub async fn listen_for_blocks(
         &mut self,
         mut rx: mpsc::Receiver<StorageOp>,
@@ -95,7 +75,7 @@ impl<'a> StorageManager<'a> {
                         )
                         .context("error while verifying piece hash")?;
 
-                    tx.send((peer_addr, piece_idx, verification_result))
+                    tx.send((peer_addr, piece_idx, verification_result.unwrap_or(false)))
                         .await
                         .context("error sending piece hash verification result")?;
                 }

@@ -2,7 +2,7 @@ use std::io::Write;
 
 use anyhow::Context;
 
-use crate::util::piece_size_from_idx;
+use crate::{state::torrent::PieceState, util::piece_size_from_idx};
 
 use super::{
     util::{find_file_offsets_for_data, read_data_from_files},
@@ -28,28 +28,37 @@ impl PieceHashVerifier {
         file_infos: &[FileInfo],
         piece_hashes: &[[u8; 20]],
         torrent_length: usize,
-    ) -> anyhow::Result<Option<u32>> {
+    ) -> anyhow::Result<(usize, Vec<PieceState>)> {
         let number_of_pieces = piece_hashes.len();
-        for piece_idx in 0..try_into!(number_of_pieces, u32)? {
-            let expected_piece_hash = piece_hashes
-                .get(try_into!(piece_idx, usize)?)
-                .context("bug: piece with no hash")?;
-            if !self
+        let mut pieces = (0..number_of_pieces)
+            .map(|_| PieceState::Queued)
+            .collect::<Vec<PieceState>>();
+        let mut verified_pieces = 0;
+        for piece_idx in 0..number_of_pieces {
+            let expected_piece_hash = piece_hashes.get(piece_idx).context("bug: piece with no hash")?;
+            match self
                 .verify_piece_hash(
                     storage,
                     file_infos,
-                    piece_idx,
+                    try_into!(piece_idx, u32)?,
                     number_of_pieces,
                     torrent_length,
                     expected_piece_hash,
                 )
                 .context("piece hash verification failed")?
             {
-                return Ok(Some(piece_idx));
+                Some(has_matching_hash) => {
+                    if has_matching_hash {
+                        verified_pieces += 1;
+                        pieces[piece_idx] = PieceState::Verified;
+                    }
+                }
+                // Data is missing because the file is incomplete, skip further checks
+                None => break,
             };
         }
 
-        Ok(None)
+        Ok((verified_pieces, pieces))
     }
 
     pub(super) fn verify_piece_hash(
@@ -60,7 +69,7 @@ impl PieceHashVerifier {
         number_of_pieces: usize,
         torrent_length: usize,
         expected_hash: &[u8; 20],
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<Option<bool>> {
         let expected_piece_length =
             piece_size_from_idx(number_of_pieces, torrent_length, self.piece_length, piece_idx)?;
         let file_offsets = find_file_offsets_for_data(file_infos, piece_idx, try_into!(self.piece_length, u64)?, None)
@@ -73,13 +82,13 @@ impl PieceHashVerifier {
 
         if !had_enough_bytes {
             // Skip hash verification, as it would fail inevitably
-            Ok(false)
+            Ok(None)
         } else {
             let mut hasher = crypto_hash::Hasher::new(crypto_hash::Algorithm::SHA1);
             hasher.write_all(&self.buf).context("error while updating hasher")?;
             let mut calculated_hash = [0u8; 20];
             calculated_hash.copy_from_slice(&hasher.finish());
-            Ok(&calculated_hash == expected_hash)
+            Ok(Some(&calculated_hash == expected_hash))
         }
     }
 }
