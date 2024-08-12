@@ -75,7 +75,7 @@ impl DhtRequester {
         let mut request_cleanup_interval =
             tokio::time::interval(Duration::from_secs_f64(INFLIGHT_REQUEST_TIMEOUT_SECS));
 
-        loop {
+        'main: loop {
             tokio::select! {
                 result = socket.recv_from(&mut self.read_buf) => {
                     let (read_bytes, from_node) = result.context("receiving a message from a node")?;
@@ -133,7 +133,14 @@ impl DhtRequester {
                                             if !self.seen_peers.contains(&ip_addr) {
                                                 self.seen_peers.push(ip_addr);
                                                 let peer_addr = SocketAddrV4::new(ip_addr, port);
-                                                peer_queue_sender.send(peer_addr).await.context("sending peer addr to the peer connect queue")?;
+                                                match peer_queue_sender.send(peer_addr).await {
+                                                    Ok(_) => {},
+                                                    Err(_) => {
+                                                        tracing::debug!("Receiving half of the peer queue sender was dropped, shutting down...");
+                                                        break 'main;
+                                                    }
+
+                                                };
                                             }
                                         }
                                     }

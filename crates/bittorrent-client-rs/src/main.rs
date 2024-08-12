@@ -45,7 +45,6 @@ fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
 //    - make it find peers faster
 //    - send request not only to nodes but to peers?
 // TODO: improve last pieces downloading speed
-// TODO: improve exiting after downloading a torrent (can be stuck requesting more peers)
 
 #[tokio::main]
 #[tracing::instrument(err)]
@@ -101,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .context("error while parsing the tracker's response")?;
 
-    let mut peers = match resp.get_peers() {
+    let peers = match resp.get_peers() {
         Some(peers) => peers?,
         None => bail!("peers are missing in the tracker response"),
     };
@@ -221,8 +220,8 @@ async fn main() -> anyhow::Result<()> {
             tokio::spawn(async move { stats.collect_stats(stats_cancel_rx).await })
         };
 
+        let (peer_manager_cancel_tx, mut peer_manager_cancel_rx) = oneshot::channel::<()>();
         let (peer_queue_tx, mut peer_queue_rx) = mpsc::channel(10);
-        let peers_c = peers.clone();
         let peer_manager_task = tokio::spawn(
             async move {
                 let spawn_peer = move |set: &mut JoinSet<anyhow::Result<()>>, peer_addr: SocketAddrV4| {
@@ -239,25 +238,33 @@ async fn main() -> anyhow::Result<()> {
                     ));
                 };
 
-                let mut peers = 0;
+                let mut n_of_peers = 0;
                 let mut peer_handler_tasks = JoinSet::new();
                 // Process all initial peers
-                for peer_address in peers_c.into_iter() {
+                for peer_address in peers.into_iter() {
                     spawn_peer(&mut peer_handler_tasks, peer_address);
-                    peers += 1;
+                    n_of_peers += 1;
                 }
 
                 loop {
                     tokio::select! {
-                        Some(next_peer) = peer_queue_rx.recv(), if peers < 90 => {
+                        Some(next_peer) = peer_queue_rx.recv(), if n_of_peers < 90 => {
                             spawn_peer(&mut peer_handler_tasks, next_peer);
-                            peers +=1;
+                            n_of_peers +=1;
                         },
                         Some(peer_handler_result) = peer_handler_tasks.join_next() => {
-                            peers -= 1;
+                            n_of_peers -= 1;
                             if let Err(e) = peer_handler_result.context("peer handler task")? {
                                 tracing::error!("an error happened in the peer: {:#}", e);
                             }
+                        }
+                        _ = &mut peer_manager_cancel_rx => {
+                            tracing::debug!("cancellation requested, aborting peer tasks");
+                            peer_handler_tasks.abort_all();
+                            // Wait for all tasks to exit
+                            while let Some(_) = peer_handler_tasks.join_next().await {}
+                            tracing::debug!("all peers finalised successfully, shutting down the manager");
+                            break;
                         }
                         else => {
                             tracing::info!("peer queue sender and all peers exited, shutting down the peer manager");
@@ -275,8 +282,6 @@ async fn main() -> anyhow::Result<()> {
         for node in ["dht.transmissionbt.com:6881", "dht.libtorrent.org:25401"] {
             if let SocketAddr::V4(addr) = node.to_socket_addrs().context("to socket addr")?.next().unwrap() {
                 dht_bootstrap_nodes.push(addr);
-                peers.iter_mut().for_each(|addr| addr.set_port(6881));
-                // dht_bootstrap_nodes.extend(peers.iter());
             }
         }
 
@@ -289,6 +294,7 @@ async fn main() -> anyhow::Result<()> {
         torrent_task.await.context("torrent task")??;
 
         let _ = dht_cancel_tx.send(());
+        let _ = peer_manager_cancel_tx.send(());
 
         peer_manager_task
             .await
