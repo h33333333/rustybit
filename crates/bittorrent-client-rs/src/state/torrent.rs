@@ -214,7 +214,7 @@ impl Torrent {
         }
     }
 
-    #[tracing::instrument(err, skip(self))]
+    #[tracing::instrument(level = "debug", err, skip(self))]
     pub async fn handle(&mut self) -> anyhow::Result<()> {
         let mut interval = time::interval(Duration::from_secs(2));
         loop {
@@ -285,10 +285,11 @@ impl Torrent {
                         DOWNLOADED_PIECES.fetch_add(1, Ordering::Relaxed);
 
                         if shared_state.finished_downloading() {
-                            tracing::debug!("all pieces were downloaded; shutting down peers");
+                            tracing::info!("Successfully finished downloading the torrent");
+                            tracing::debug!("shutting down peers");
                             for (peer_addr, req_tx) in self.peer_req_txs.drain() {
                                 if req_tx.send(TorrentManagerReq::Disconnect("finished downloading")).await.is_err() {
-                                    tracing::error!(
+                                    tracing::debug!(
                                         %peer_addr,
                                         "error while shutting down a peer: peer already dropped the receiver"
                                     );

@@ -64,7 +64,7 @@ impl DhtRequester {
         })
     }
 
-    #[tracing::instrument(level = "trace", err, skip_all)]
+    #[tracing::instrument(level = "debug", err, skip_all)]
     pub async fn process_dht_nodes(
         &mut self,
         mut cancellation: oneshot::Receiver<()>,
@@ -103,7 +103,7 @@ impl DhtRequester {
                                 },
                                 KrpcMessageType::Response { response }=> {
                                     if !response.nodes.is_some() && !response.values.is_some() {
-                                        tracing::error!(
+                                        tracing::debug!(
                                             addr = %from_node,
                                             "Bad get_peers response from node: no nodes or peers",
                                         )
@@ -154,7 +154,7 @@ impl DhtRequester {
                                 }
                             }
                         }
-                        Err(e) => tracing::error!(addr = %from_node, "An error happened while decoding a message from DHT node: {}", e)
+                        Err(e) => tracing::debug!(addr = %from_node, "An error happened while decoding a message from DHT node: {}", e)
                     }
                 }
                 _ = self.rate_limiter.until_ready(), if !self.node_queue.is_empty() => {
@@ -190,7 +190,7 @@ impl DhtRequester {
         Ok(())
     }
 
-    #[tracing::instrument(level = "trace", err, skip_all)]
+    #[tracing::instrument(level = "debug", err, skip_all)]
     pub async fn query_next_node(&mut self, socket: &UdpSocket) -> anyhow::Result<bool> {
         let Some(next_node) = self.node_queue.pop_front() else {
             // We can't continue from this point, as there are no other nodes to request data from.

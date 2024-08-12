@@ -17,7 +17,7 @@ use leechy_dht::DhtRequester;
 use tokio::sync::mpsc::{self, unbounded_channel};
 use tokio::sync::{oneshot, RwLock};
 use tokio::task::JoinSet;
-use tracing::Instrument;
+use tracing::{event, span, Instrument};
 use url::Url;
 
 fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {
@@ -255,7 +255,7 @@ async fn main() -> anyhow::Result<()> {
                         Some(peer_handler_result) = peer_handler_tasks.join_next() => {
                             n_of_peers -= 1;
                             if let Err(e) = peer_handler_result.context("peer handler task")? {
-                                tracing::error!("an error happened in the peer: {:#}", e);
+                                tracing::debug!("an error happened in a peer: {:#}", e);
                             }
                         }
                         _ = &mut peer_manager_cancel_rx => {
@@ -267,7 +267,7 @@ async fn main() -> anyhow::Result<()> {
                             break;
                         }
                         else => {
-                            tracing::info!("peer queue sender and all peers exited, shutting down the peer manager");
+                            tracing::debug!("peer queue sender and all peers exited, shutting down the peer manager");
                             break;
                         }
                     }
@@ -275,7 +275,7 @@ async fn main() -> anyhow::Result<()> {
 
                 Ok::<(), anyhow::Error>(())
             }
-            .instrument(tracing::trace_span!("peer manager task")),
+            .instrument(tracing::error_span!("peer manager task")),
         );
 
         let mut dht_bootstrap_nodes = Vec::with_capacity(2);

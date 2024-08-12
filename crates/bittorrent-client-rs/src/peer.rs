@@ -20,7 +20,7 @@ use crate::buffer::ReadBuf;
 use crate::state::event::{PeerEvent, TorrentManagerReq};
 use crate::Result;
 
-#[tracing::instrument(level = "trace", err, skip_all, fields(%peer_addr))]
+#[tracing::instrument(level = "error", err(level = tracing::Level::DEBUG), skip_all, fields(%peer_addr))]
 pub async fn handle_peer(
     peer_addr: SocketAddrV4,
     metadata: TorrentMeta,
@@ -186,7 +186,7 @@ impl PeerHandler {
         }
     }
 
-    #[tracing::instrument(err, skip_all)]
+    #[tracing::instrument(level = "debug", err, skip_all)]
     async fn handle_message(
         &mut self,
         message: BittorrentP2pMessage,
@@ -265,14 +265,13 @@ impl PeerHandler {
                 tracing::trace!(?port, "received a Port message");
             }
             KeepAlive => {
-                tracing::trace!("KeepAlive");
+                tracing::debug!("received a KeepAlive message");
             }
         };
 
         Ok(None)
     }
 
-    #[tracing::instrument(err, skip(self))]
     async fn send_block_requests(&mut self, output: &mut Vec<u8>) -> Result<()> {
         for _ in 0..(Self::MAX_PENDING_BLOCK_REQUESTS - self.sent_block_requests.len()) {
             if let Some(request) = self.block_requests_queue.pop_front() {
@@ -309,7 +308,6 @@ impl PeerHandler {
         Ok(())
     }
 
-    #[tracing::instrument(err, skip(self, output))]
     async fn send_interested(&mut self, client_interested: bool, output: &mut Vec<u8>) -> Result<()> {
         if client_interested {
             BittorrentP2pMessage::Interested.encode(output).await?;
@@ -322,7 +320,6 @@ impl PeerHandler {
         Ok(())
     }
 
-    #[tracing::instrument(err, skip(self, output))]
     async fn send_chocked(&mut self, client_choked: bool, output: &mut Vec<u8>) -> Result<()> {
         if client_choked {
             BittorrentP2pMessage::Choke.encode(output).await?;
@@ -335,7 +332,6 @@ impl PeerHandler {
         Ok(())
     }
 
-    #[tracing::instrument(level = "trace", err, skip(self, output))]
     async fn send_have_message(&self, piece_idx: u32, output: &mut Vec<u8>) -> Result<()> {
         Ok(BittorrentP2pMessage::Have(piece_idx).encode(output).await?)
     }
