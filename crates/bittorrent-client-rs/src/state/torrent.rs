@@ -22,7 +22,11 @@ use tokio::time;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PieceState {
     Queued,
-    Downloading { peer: SocketAddrV4, start: Instant },
+    Downloading {
+        peer: SocketAddrV4,
+        start: Instant,
+        stealed_at: Option<Instant>,
+    },
     Downloaded,
     Verified,
 }
@@ -79,12 +83,22 @@ impl TorrentSharedState {
                         *status = PieceState::Downloading {
                             peer: peer_addr,
                             start: Instant::now(),
+                            stealed_at: None,
                         };
                         Some(try_into!(idx, u32).map(|idx| (idx, None)))
                     }
-                    PieceState::Downloading { peer, start } => {
+                    PieceState::Downloading {
+                        peer,
+                        start,
+                        stealed_at,
+                    } => {
                         let peer = *peer;
                         if peer == peer_addr {
+                            return None;
+                        }
+
+                        // Don't steal a piece too often
+                        if stealed_at.is_some_and(|instant| instant.elapsed().as_secs_f64() < 5.0) {
                             return None;
                         }
 
@@ -103,6 +117,7 @@ impl TorrentSharedState {
                             *status = PieceState::Downloading {
                                 peer: peer_addr,
                                 start: Instant::now(),
+                                stealed_at: Some(Instant::now()),
                             };
                             Some(try_into!(idx, u32).map(|idx| (idx, Some(peer))))
                         } else {
