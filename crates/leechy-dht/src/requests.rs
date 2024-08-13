@@ -83,14 +83,8 @@ pub enum KrpcMessageType<'a, M: KrpcQueryMessage<'a>> {
     #[serde(rename = "e")]
     Error {
         #[serde(rename = "e", borrow)]
-        error: ErrorMsg<'a>,
+        error: (u16, Cow<'a, str>),
     },
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ErrorMsg<'a> {
-    #[serde(rename = "e", borrow)]
-    errors: Cow<'a, [(u16, Cow<'a, str>)]>,
 }
 
 #[cfg(test)]

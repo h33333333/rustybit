@@ -1,8 +1,12 @@
-use rand::Rng;
+use rand::{distributions::Alphanumeric, Rng};
 
-pub fn generate_string(length: usize) -> String {
+pub fn generate_node_id() -> [u8; 20] {
+    let mut id = [0u8; 20];
+    id[0..9].copy_from_slice(b"RustyBit-");
     let mut rng = rand::thread_rng();
-    let mut s = String::with_capacity(length);
-    s.extend((0..length).map(|_| rng.sample(rand::distributions::Alphanumeric) as char));
-    s
+    (0..11).for_each(|idx| {
+        let idx = idx + 9;
+        id[idx] = rng.sample(Alphanumeric);
+    });
+    id
 }

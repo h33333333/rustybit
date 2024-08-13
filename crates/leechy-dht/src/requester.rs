@@ -1,4 +1,5 @@
 use crate::requests::{GetPeersQueryMessage, KrpcMessage, KrpcMessageType};
+use crate::util::generate_node_id;
 use anyhow::Context;
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use std::num::NonZeroU32;
@@ -36,12 +37,11 @@ impl DhtRequester {
         let node_queue = VecDeque::from(bootstrap_node_addrs);
 
         let message = KrpcMessage {
-            transaction_id: "010".into(),
+            transaction_id: "10".into(),
             message_type: KrpcMessageType::Query {
                 name: "get_peers".into(),
                 query: GetPeersQueryMessage {
-                    // TODO: generate properly
-                    id: info_hash,
+                    id: generate_node_id(),
                     info_hash,
                 },
             },
@@ -82,7 +82,7 @@ impl DhtRequester {
                     let from_node = match from_node {
                         SocketAddr::V4(addr) => addr,
                         _ => {
-                            tracing::error!("received a message from node using IPv6: {}", from_node);
+                            tracing::debug!("received a message from node using IPv6: {}", from_node);
                             continue;
                         }
                     };
@@ -146,7 +146,7 @@ impl DhtRequester {
                                     }
                                 },
                                 KrpcMessageType::Error { error } => {
-                                    tracing::error!(
+                                    tracing::debug!(
                                         addr = %from_node,
                                         "Got Error from DHT node: {:?}",
                                         error
@@ -154,8 +154,7 @@ impl DhtRequester {
                                 }
                             }
                         }
-                        Err(e) => tracing::debug!(addr = %from_node, "An error happened while decoding a message from DHT node: {}", e)
-                    }
+                        Err(e) => tracing::debug!(addr = %from_node, "An error happened while decoding a message from DHT node: {}", e)}
                 }
                 _ = self.rate_limiter.until_ready(), if !self.node_queue.is_empty() => {
                     self
