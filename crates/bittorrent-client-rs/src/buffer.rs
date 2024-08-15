@@ -21,7 +21,7 @@ impl ReadBuf {
         }
     }
 
-    #[tracing::instrument(level = "debug", err, skip_all)]
+    #[tracing::instrument(level = "error", err(level = "debug"), skip_all)]
     pub async fn read_handshake(&mut self, stream: &mut TcpStream) -> anyhow::Result<Handshake> {
         // Read from stream until we get a handshake
         loop {
@@ -44,7 +44,7 @@ impl ReadBuf {
         }
     }
 
-    #[tracing::instrument(level = "debug", err, skip_all)]
+    #[tracing::instrument(level = "error", err(level = "debug"), skip_all)]
     pub async fn read_message(&mut self, stream: &mut TcpStream) -> anyhow::Result<BittorrentP2pMessage> {
         self.reset_processed();
         loop {
