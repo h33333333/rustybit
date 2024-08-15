@@ -25,7 +25,7 @@ pub enum PieceState {
     Downloading {
         peer: SocketAddrV4,
         start: Instant,
-        stealed_at: Option<Instant>,
+        stolen_at: Option<Instant>,
     },
     Downloaded,
     Verified,
@@ -56,7 +56,7 @@ impl TorrentSharedState {
         let total_pieces = self.pieces.len() as f64;
         let downloaded_pieces = DOWNLOADED_PIECES.load(Ordering::Relaxed) as f64;
         if downloaded_pieces / total_pieces >= 80. {
-            2.
+            3.
         } else {
             10.
         }
@@ -83,41 +83,42 @@ impl TorrentSharedState {
                         *status = PieceState::Downloading {
                             peer: peer_addr,
                             start: Instant::now(),
-                            stealed_at: None,
+                            stolen_at: None,
                         };
                         Some(try_into!(idx, u32).map(|idx| (idx, None)))
                     }
-                    PieceState::Downloading {
-                        peer,
-                        start,
-                        stealed_at,
-                    } => {
+                    PieceState::Downloading { peer, start, stolen_at } => {
                         let peer = *peer;
                         if peer == peer_addr {
                             return None;
                         }
 
                         // Don't steal a piece too often
-                        if stealed_at.is_some_and(|instant| instant.elapsed().as_secs_f64() < 5.0) {
+                        if stolen_at.is_some_and(|instant| instant.elapsed().as_secs_f64() < 5.0) {
                             return None;
                         }
 
-                        let downloading_peer_stats = self.peer_download_stats.entry(peer).or_insert((0., 0.));
-                        let downloading_peer_avg_time = downloading_peer_stats.1 / downloading_peer_stats.0;
-
                         let requesting_peer_stats = self.peer_download_stats.entry(peer_addr).or_insert((0., 0.));
+                        // Compare elapsed time to requesting peer's average piece downloading time
                         if requesting_peer_stats.1 == 0. {
                             None
-
-                        // Compare elapsed time to requesting peer's average piece downloading time
                         } else if start.elapsed().as_secs_f64()
                             > (requesting_peer_stats.1 / requesting_peer_stats.0) * piece_steal_coeff
-                            || start.elapsed().as_secs_f64() > downloading_peer_avg_time * piece_steal_coeff
                         {
+                            let avg_time = requesting_peer_stats.1 / requesting_peer_stats.0;
+                            tracing::debug!(
+                                %peer_addr,
+                                stolen_from=%peer,
+                                piece=%idx,
+                                "stole a piece: elapsed time {}, my avg piece time: {}",
+                                start.elapsed().as_secs_f64(),
+                                avg_time
+                            );
+                            let now = Instant::now();
                             *status = PieceState::Downloading {
                                 peer: peer_addr,
-                                start: Instant::now(),
-                                stealed_at: Some(Instant::now()),
+                                start: now,
+                                stolen_at: Some(now),
                             };
                             Some(try_into!(idx, u32).map(|idx| (idx, Some(peer))))
                         } else {
@@ -216,7 +217,7 @@ impl Torrent {
 
     #[tracing::instrument(level = "debug", err, skip(self))]
     pub async fn handle(&mut self) -> anyhow::Result<()> {
-        let mut interval = time::interval(Duration::from_secs(2));
+        let mut interval = time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
                 result = self.rx.recv() => {
@@ -258,7 +259,7 @@ impl Torrent {
                     let piece_state = shared_state.pieces.get_mut(try_into!(piece_idx, usize)?).context("bug: downloaded a ghost piece?")?;
 
                     if !is_correct {
-                        tracing::error!(
+                        tracing::debug!(
                             %peer_addr,
                             %piece_idx,
                             "piece hash verification failed: disconnecting the peer"
@@ -271,7 +272,7 @@ impl Torrent {
                         drop(shared_state);
                         if let Some(req_tx) = self.remove_peer_req_tx(&peer_addr) {
                             if req_tx.send(TorrentManagerReq::Disconnect("piece hash verification failed")).await.is_err() {
-                                tracing::error!(
+                                tracing::debug!(
                                     %peer_addr,
                                     "error while shutting down a peer: peer already dropped the receiver"
                                 );
