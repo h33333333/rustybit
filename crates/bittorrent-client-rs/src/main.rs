@@ -17,7 +17,7 @@ use leechy_dht::DhtRequester;
 use tokio::sync::mpsc::{self, unbounded_channel};
 use tokio::sync::{oneshot, RwLock};
 use tokio::task::JoinSet;
-use tracing::{event, span, Instrument};
+use tracing::Instrument;
 use url::Url;
 
 fn params(url: &str, request: TrackerRequest<'_>) -> anyhow::Result<Url> {

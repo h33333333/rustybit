@@ -278,7 +278,6 @@ impl PeerHandler {
                 BittorrentP2pMessage::Request(request.clone()).encode(output).await?;
                 self.sent_block_requests.push(request);
             } else {
-                // Nothing left to send
                 break;
             }
         }
