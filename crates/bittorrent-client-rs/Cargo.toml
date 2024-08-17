@@ -7,7 +7,7 @@ edition = "2021"
 bittorrent-peer-protocol.workspace = true
 leechy-dht.workspace = true
 serde_bencode.workspace = true
-clap = { version = "4.3.14", features = ["derive"] }
+clap = { version = "4.3.14", features = ["derive", "string"] }
 tokio = { version = "1", features = [
     "fs",
     "net",
