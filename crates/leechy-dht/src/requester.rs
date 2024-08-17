@@ -2,6 +2,7 @@ use crate::requests::{GetPeersQueryMessage, KrpcMessage, KrpcMessageType};
 use crate::util::generate_node_id;
 use anyhow::Context;
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
+use std::net::ToSocketAddrs;
 use std::num::NonZeroU32;
 use std::{
     collections::VecDeque,
@@ -29,12 +30,27 @@ pub struct DhtRequester {
 }
 
 impl DhtRequester {
-    pub fn new(bootstrap_node_addrs: Vec<SocketAddrV4>, info_hash: [u8; 20]) -> anyhow::Result<Self> {
-        if bootstrap_node_addrs.is_empty() {
-            anyhow::bail!("No bootstrap nodes specified");
-        }
+    pub fn new(bootstrap_node_addrs: Option<Vec<SocketAddrV4>>, info_hash: [u8; 20]) -> anyhow::Result<Self> {
+        let node_queue = VecDeque::from(bootstrap_node_addrs.unwrap_or_else(|| {
+            ["dht.transmissionbt.com:6881", "dht.libtorrent.org:25401"]
+                .iter()
+                .filter_map(|&node| {
+                    node.to_socket_addrs().ok().and_then(|mut socket_addrs| {
+                        socket_addrs.find_map(|addr| {
+                            if let SocketAddr::V4(v4_addr) = addr {
+                                Some(v4_addr)
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                })
+                .collect()
+        }));
 
-        let node_queue = VecDeque::from(bootstrap_node_addrs);
+        if node_queue.is_empty() {
+            anyhow::bail!("No suitable bootstrap DHT nodes found");
+        }
 
         let message = KrpcMessage {
             transaction_id: "10".into(),
