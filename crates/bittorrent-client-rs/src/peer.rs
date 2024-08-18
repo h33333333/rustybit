@@ -346,8 +346,8 @@ impl PeerHandler {
             self.torrent_metadata.number_of_pieces,
             self.torrent_metadata.total_length,
             self.torrent_metadata.piece_size,
-            index,
-        )? as u32;
+            try_into!(index, usize)?,
+        ) as u32;
         let mut begin = 0u32;
         while leftover_piece_size > 0 {
             let length = DEFAULT_BLOCK_SIZE.min(leftover_piece_size);

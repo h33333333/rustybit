@@ -32,7 +32,7 @@ pub struct Info<'a> {
     pub name: Cow<'a, str>,
     /// Number of bytes in each piece
     #[serde(rename = "piece length")]
-    pub piece_length: u64,
+    pub piece_length: usize,
     /// Concatenated piece hashes (20-byte SHA1 hash values). Must be a multiple of 20
     #[serde(with = "serde_bytes", borrow)]
     pub pieces: Cow<'a, [u8]>,

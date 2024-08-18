@@ -1,6 +1,5 @@
 use std::{fs, io::Read as _};
 
-use crate::Result;
 use rand::{distributions::Alphanumeric, Rng};
 
 pub fn generate_peer_id() -> String {
@@ -11,8 +10,8 @@ pub fn generate_peer_id() -> String {
     peer_id
 }
 
-pub fn piece_size_from_idx(number_of_pieces: usize, total_length: usize, piece_size: usize, idx: u32) -> Result<usize> {
-    let size = if number_of_pieces - 1 == try_into!(idx, usize)? {
+pub fn piece_size_from_idx(number_of_pieces: usize, total_length: usize, piece_size: usize, idx: usize) -> usize {
+    let size = if number_of_pieces - 1 == idx {
         let remainder = total_length % piece_size;
         if remainder == 0 {
             piece_size
@@ -23,7 +22,7 @@ pub fn piece_size_from_idx(number_of_pieces: usize, total_length: usize, piece_s
         piece_size
     };
 
-    Ok(size)
+    size
 }
 
 pub fn read_file(path: &str) -> anyhow::Result<Vec<u8>> {

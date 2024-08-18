@@ -335,8 +335,8 @@ impl Torrent {
             self.torrent_meta.number_of_pieces,
             self.torrent_meta.total_length,
             self.torrent_meta.piece_size,
-            index,
-        )?;
+            try_into!(index, usize)?,
+        );
 
         if *downloaded_bytes + block.len() > expected_piece_size {
             // TODO: do not bail, disconnect only one peer

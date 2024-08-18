@@ -73,31 +73,44 @@ impl TorrentManager {
             TorrentFileMetadata::new(&mut meta_info.info, &base_path).context("bug: bad metadata")?
         };
 
-        let length = meta_info.info.files.as_ref().map_or_else(
-            || {
-                meta_info.info.length.ok_or(Error::InternalError(
-                    "Malformed torrent file: both 'files' and 'length' fields are missing",
-                ))
-            },
-            |files| {
-                Ok(files.iter().fold(0, |mut acc, file| {
-                    acc += file.length;
-                    acc
-                }))
-            },
-        )?;
+        let length = meta_info
+            .info
+            .files
+            .as_ref()
+            .map_or_else(
+                || {
+                    meta_info
+                        .info
+                        .length
+                        .map(|len| try_into!(len, usize).ok())
+                        .ok_or(Error::InternalError(
+                            "Malformed torrent file: both 'files' and 'length' fields are missing",
+                        ))
+                },
+                |files| {
+                    Ok(try_into!(
+                        files.iter().fold(0, |mut acc, file| {
+                            acc += file.length;
+                            acc
+                        }),
+                        usize
+                    )
+                    .ok())
+                },
+            )?
+            .context("converting total torrent length to usize")?;
 
         let mut storage =
             FileStorage::new(&file_metadata.file_infos).context("error while creating a file-based storage")?;
-        let mut piece_hash_verifier = PieceHashVerifier::new(try_into!(meta_info.info.piece_length, usize)?);
+        let mut piece_hash_verifier = PieceHashVerifier::new(meta_info.info.piece_length);
 
         let (verified_pieces, downloaded, left, piece_states) = match self.do_initial_checksum_verification(
             &mut piece_hash_verifier,
             &mut storage,
             &file_metadata.file_infos,
             &splitted_piece_hashes,
-            try_into!(length, usize)?,
-            try_into!(meta_info.info.piece_length, usize)?,
+            length,
+            meta_info.info.piece_length,
         )? {
             Some((verified_pieces, downloaded, left, piece_states)) => {
                 (verified_pieces, downloaded, left, piece_states)
@@ -108,17 +121,12 @@ impl TorrentManager {
         DOWNLOADED_PIECES.store(verified_pieces, Ordering::Relaxed);
 
         let info_hash = meta_info.info.hash()?;
-        let piece_length = meta_info.info.piece_length;
         let n_of_pieces = splitted_piece_hashes.len();
 
-        let torrent_meta = TorrentMeta::new(
-            info_hash,
-            try_into!(piece_length, usize)?,
-            try_into!(length, usize)?,
-            n_of_pieces,
-        )
-        .context("TorrentMeta")?;
+        let torrent_meta =
+            TorrentMeta::new(info_hash, meta_info.info.piece_length, length, n_of_pieces).context("TorrentMeta")?;
 
+        let piece_length = try_into!(meta_info.info.piece_length, u64)?;
         let (storage_task, storage_tx, hash_check_rx) = spawn_storage_task(
             storage,
             file_metadata,
@@ -138,10 +146,15 @@ impl TorrentManager {
             hash_check_rx,
         );
 
-        let (stats_task, stats_cancel_tx) = spawn_stats_task(try_into!(length, usize)?, downloaded, left);
+        let (stats_task, stats_cancel_tx) = spawn_stats_task(length, downloaded, left);
 
         let peers = self
-            .get_peers_from_tracker(length, try_into!(downloaded, u64)?, &meta_info.announce, info_hash)
+            .get_peers_from_tracker(
+                try_into!(length, u64)?,
+                try_into!(downloaded, u64)?,
+                &meta_info.announce,
+                info_hash,
+            )
             .await?;
         let peer_id: [u8; 20] = self.peer_id.as_bytes().try_into()?;
 
@@ -307,7 +320,7 @@ fn spawn_storage_task(
     piece_length: u64,
     hash_verifier: PieceHashVerifier,
     n_of_pieces: usize,
-    total_length: u64,
+    total_length: usize,
 ) -> anyhow::Result<(
     JoinHandle<anyhow::Result<()>>,
     mpsc::Sender<StorageOp>,

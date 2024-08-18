@@ -70,8 +70,12 @@ impl PieceHashVerifier {
         torrent_length: usize,
         expected_hash: &[u8; 20],
     ) -> anyhow::Result<Option<bool>> {
-        let expected_piece_length =
-            piece_size_from_idx(number_of_pieces, torrent_length, self.piece_length, piece_idx)?;
+        let expected_piece_length = piece_size_from_idx(
+            number_of_pieces,
+            torrent_length,
+            self.piece_length,
+            try_into!(piece_idx, usize)?,
+        );
         let file_offsets = find_file_offsets_for_data(file_infos, piece_idx, try_into!(self.piece_length, u64)?, None)
             .context("error while finding offsets for a piece")?
             .context("bug: failed to find a matching file for a piece?")?;

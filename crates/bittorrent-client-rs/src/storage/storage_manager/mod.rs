@@ -30,7 +30,7 @@ impl<'a> StorageManager<'a> {
         piece_length: u64,
         piece_hash_verifier: PieceHashVerifier,
         number_of_pieces: usize,
-        total_torrent_length: u64,
+        total_torrent_length: usize,
     ) -> anyhow::Result<Self> {
         Ok(StorageManager {
             storage,
@@ -38,7 +38,7 @@ impl<'a> StorageManager<'a> {
             file_metadata,
             piece_length,
             number_of_pieces,
-            total_torrent_length: try_into!(total_torrent_length, usize)?,
+            total_torrent_length,
         })
     }
 
