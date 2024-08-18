@@ -331,10 +331,6 @@ impl PeerHandler {
         Ok(())
     }
 
-    async fn send_have_message(&self, piece_idx: u32, output: &mut Vec<u8>) -> Result<()> {
-        Ok(BittorrentP2pMessage::Have(piece_idx).encode(output).await?)
-    }
-
     async fn send_keep_alive(&self, output: &mut Vec<u8>) -> Result<()> {
         BittorrentP2pMessage::KeepAlive.encode(output).await?;
 

@@ -11,7 +11,6 @@ mod buffer;
 pub static DOWNLOADED_BYTES: AtomicUsize = AtomicUsize::new(0);
 pub static DOWNLOADED_PIECES: AtomicUsize = AtomicUsize::new(0);
 pub static NUMBER_OF_PEERS: AtomicU8 = AtomicU8::new(0);
-pub static CONNECTING_PEERS: AtomicU8 = AtomicU8::new(0);
 
 struct Snapshot {
     time: Instant,
