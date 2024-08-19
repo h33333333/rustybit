@@ -228,16 +228,17 @@ impl Torrent {
                                 // stealing the piece
                                 let mut state = self.shared_state.write().await;
                                 if Torrent::verify_piece_not_stolen(&state, peer_addr, try_into!(block.index, usize)?).await? {
-                                    self.add_block(&mut state, peer_addr, block).await?;
+                                    if !self.add_block(&mut state, peer_addr, block).await? {
+                                        drop(state);
+                                        self.disconnect_peer(&peer_addr, "error while adding a block", true).await?;
+                                    };
                                 }
                             }
                             PeerEvent::Disconnected => {
                                 tracing::debug!(%peer_addr, "peer exited unexpectedly");
                                 // Drop peer cancellation tx
                                 self.remove_peer_req_tx(&peer_addr);
-
-                                NUMBER_OF_PEERS.fetch_sub(1, Ordering::Relaxed);
-                                self.shared_state.write().await.on_peer_disconnect(&peer_addr);
+                                self.disconnect_peer(&peer_addr, "peer exited", false).await?;
 
                                 if self.peer_req_txs.is_empty() && !self.shared_state.read().await.finished_downloading() {
                                     anyhow::bail!("All peers exited before finishing the torrent, the download is incomplete");
@@ -255,9 +256,6 @@ impl Torrent {
                         anyhow::bail!("bug: storage backend exited before torrent manager?");
                     };
 
-                    let mut shared_state = self.shared_state.write().await;
-                    let piece_state = shared_state.pieces.get_mut(try_into!(piece_idx, usize)?).context("bug: downloaded a ghost piece?")?;
-
                     if !is_correct {
                         tracing::debug!(
                             %peer_addr,
@@ -265,20 +263,11 @@ impl Torrent {
                             "piece hash verification failed: disconnecting the peer"
                         );
 
-                        *piece_state = PieceState::Queued;
-                        // Reset download progress for the failed piece
-                        shared_state.piece_download_progress.insert(piece_idx, 0);
-
-                        drop(shared_state);
-                        if let Some(req_tx) = self.remove_peer_req_tx(&peer_addr) {
-                            if req_tx.send(TorrentManagerReq::Disconnect("piece hash verification failed")).await.is_err() {
-                                tracing::debug!(
-                                    %peer_addr,
-                                    "error while shutting down a peer: peer already dropped the receiver"
-                                );
-                            }
-                        };
+                        self.disconnect_peer(&peer_addr, "piece hash verification failed", true).await?;
                     } else {
+                        let mut shared_state = self.shared_state.write().await;
+                        let piece_state = shared_state.pieces.get_mut(try_into!(piece_idx, usize)?).context("bug: downloaded a ghost piece?")?;
+
                         *piece_state = PieceState::Verified;
 
                         let downloaded_bytes = shared_state.piece_download_progress.get(&piece_idx).context("bug: downloaded a piece but didn't track its bytes?")?;
@@ -328,7 +317,7 @@ impl Torrent {
         state: &mut TorrentSharedState,
         peer_addr: SocketAddrV4,
         Block { index, begin, block }: Block,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         let downloaded_bytes = state.piece_download_progress.entry(index).or_insert(0);
 
         let expected_piece_size = piece_size_from_idx(
@@ -339,12 +328,12 @@ impl Torrent {
         );
 
         if *downloaded_bytes + block.len() > expected_piece_size {
-            // TODO: do not bail, disconnect only one peer
-            anyhow::bail!(
+            tracing::debug!(
                 "piece is larger than expected: {} vs {}",
                 *downloaded_bytes + block.len(),
                 expected_piece_size,
             );
+            return Ok(false);
         }
 
         *downloaded_bytes += block.len();
@@ -362,11 +351,12 @@ impl Torrent {
         if *downloaded_bytes == expected_piece_size {
             let piece_idx = try_into!(index, usize)?;
             let Some(expected_piece_hash) = self.get_piece_hash(piece_idx) else {
-                anyhow::bail!(format!(
+                tracing::debug!(
                     "Wrong piece index: index {}, total pieces: {}",
                     piece_idx,
                     self.shared_state.read().await.get_number_of_pieces()
-                ));
+                );
+                return Ok(false);
             };
 
             let piece_state = state
@@ -403,7 +393,7 @@ impl Torrent {
                 })?;
         }
 
-        Ok(())
+        Ok(true)
     }
 
     fn get_peer_req_tx(&self, peer_addr: &SocketAddrV4) -> Option<&mpsc::Sender<TorrentManagerReq>> {
@@ -428,5 +418,49 @@ impl Torrent {
             PieceState::Downloading { peer, .. } if *peer == peer_addr => Ok(true),
             _ => Ok(false),
         }
+    }
+
+    async fn disconnect_peer(
+        &mut self,
+        peer_addr: &SocketAddrV4,
+        disconnect_reason: &'static str,
+        send_disconnect: bool,
+    ) -> anyhow::Result<()> {
+        if send_disconnect {
+            if let Some(req_tx) = self.remove_peer_req_tx(&peer_addr) {
+                if req_tx
+                    .send(TorrentManagerReq::Disconnect(disconnect_reason))
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!(
+                        %peer_addr,
+                        "error while shutting down a peer: peer already dropped the receiver"
+                    );
+                }
+            };
+        }
+
+        let mut state = self.shared_state.write().await;
+        let reset_pieces = state
+            .pieces
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(idx, piece_state)| match piece_state {
+                PieceState::Downloading { peer, .. } if peer == peer_addr => {
+                    *piece_state = PieceState::Queued;
+                    Some(idx)
+                }
+                _ => None,
+            })
+            .collect::<Vec<usize>>();
+        for piece in reset_pieces.into_iter() {
+            let piece_idx = try_into!(piece, u32)?;
+            state.piece_download_progress.insert(piece_idx, 0);
+        }
+
+        NUMBER_OF_PEERS.fetch_sub(1, Ordering::Relaxed);
+
+        Ok(())
     }
 }
