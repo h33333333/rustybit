@@ -357,8 +357,6 @@ fn spawn_torrent_task(
     let (peer_event_tx, peer_event_rx) = unbounded_channel();
     let (new_peer_tx, new_peer_rx) = unbounded_channel();
     let torrent_task = tokio::spawn(async move {
-        // TODO: this struct will most likely need peer_id in order to finish downloading
-        // torrents and send keep alives
         let mut torrent = Torrent::new(
             meta,
             state,
