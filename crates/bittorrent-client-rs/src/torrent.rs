@@ -7,8 +7,7 @@ use crate::{
     stats::{Stats, DOWNLOADED_BYTES, DOWNLOADED_PIECES},
     storage::{FileInfo, StorageOp},
     torrent_meta::TorrentMeta,
-    tracker, Error, FileStorage, PieceHashVerifier, Result, Storage, StorageManager, Torrent, TorrentFileMetadata,
-    TorrentSharedState,
+    tracker, FileStorage, PieceHashVerifier, Storage, StorageManager, Torrent, TorrentFileMetadata, TorrentSharedState,
 };
 use std::{
     net::SocketAddrV4,
@@ -62,7 +61,7 @@ impl TorrentManager {
             .pieces
             .chunks(20)
             .map(|item| try_into!(item, [u8; 20]))
-            .collect::<Result<Vec<[u8; 20]>>>()?;
+            .collect::<anyhow::Result<Vec<[u8; 20]>>>()?;
 
         let file_metadata = {
             let mut base_path = self.base_download_path.clone();
@@ -83,7 +82,7 @@ impl TorrentManager {
                         .info
                         .length
                         .map(|len| try_into!(len, usize).ok())
-                        .ok_or(Error::InternalError(
+                        .ok_or(anyhow::anyhow!(
                             "Malformed torrent file: both 'files' and 'length' fields are missing",
                         ))
                 },
@@ -123,8 +122,7 @@ impl TorrentManager {
         let info_hash = meta_info.info.hash()?;
         let n_of_pieces = splitted_piece_hashes.len();
 
-        let torrent_meta =
-            TorrentMeta::new(info_hash, meta_info.info.piece_length, length, n_of_pieces).context("TorrentMeta")?;
+        let torrent_meta = TorrentMeta::new(info_hash, meta_info.info.piece_length, length, n_of_pieces);
 
         let piece_length = try_into!(meta_info.info.piece_length, u64)?;
         let (storage_task, storage_tx, hash_check_rx) = spawn_storage_task(
@@ -137,7 +135,7 @@ impl TorrentManager {
         )
         .context("spawning a storage manager")?;
 
-        let torrent_state = Arc::new(RwLock::new(TorrentSharedState::new(piece_states, n_of_pieces)?));
+        let torrent_state = Arc::new(RwLock::new(TorrentSharedState::new(piece_states, n_of_pieces)));
         let (torrent_task, peer_event_tx, new_peer_tx) = spawn_torrent_task(
             torrent_meta.clone(),
             torrent_state.clone(),

@@ -1,4 +1,3 @@
-use crate::Result;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 use anyhow::Context;
@@ -86,7 +85,7 @@ pub struct TrackerResponse {
 
 impl TrackerResponse {
     /// Uses compact format as described in [BEP-23](https://www.bittorrent.org/beps/bep_0023.https)
-    pub fn get_peers(&self) -> Option<Result<Vec<SocketAddrV4>>> {
+    pub fn get_peers(&self) -> Option<anyhow::Result<Vec<SocketAddrV4>>> {
         self.peers.as_ref().map(|peers| {
             // BitTorrent represents each peer as a 6-byte value. The first 4 bytes are the IP address, and the last 2 are the port
             let mut peer_ips: Vec<SocketAddrV4> = Vec::with_capacity(peers.len() / 6);

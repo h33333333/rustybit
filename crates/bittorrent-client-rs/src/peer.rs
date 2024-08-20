@@ -18,7 +18,6 @@ use tokio::time;
 
 use crate::buffer::ReadBuf;
 use crate::state::event::{PeerEvent, TorrentManagerReq};
-use crate::Result;
 
 #[tracing::instrument(level = "error", err(level = tracing::Level::DEBUG), skip_all, fields(%peer_addr))]
 pub async fn handle_peer(
@@ -275,7 +274,7 @@ impl PeerHandler {
         Ok(None)
     }
 
-    async fn send_block_requests(&mut self, output: &mut Vec<u8>) -> Result<()> {
+    async fn send_block_requests(&mut self, output: &mut Vec<u8>) -> anyhow::Result<()> {
         for _ in 0..(Self::MAX_PENDING_BLOCK_REQUESTS - self.sent_block_requests.len()) {
             if let Some(request) = self.block_requests_queue.pop_front() {
                 BittorrentP2pMessage::Request(request.clone()).encode(output).await?;
@@ -288,7 +287,7 @@ impl PeerHandler {
         Ok(())
     }
 
-    async fn cancel_block_requests_for_piece(&mut self, piece_idx: u32, output: &mut Vec<u8>) -> Result<()> {
+    async fn cancel_block_requests_for_piece(&mut self, piece_idx: u32, output: &mut Vec<u8>) -> anyhow::Result<()> {
         // Remove queued requests for this piece if any
         self.block_requests_queue.retain(|block| block.index != piece_idx);
 
@@ -310,7 +309,7 @@ impl PeerHandler {
         Ok(())
     }
 
-    async fn send_interested(&mut self, client_interested: bool, output: &mut Vec<u8>) -> Result<()> {
+    async fn send_interested(&mut self, client_interested: bool, output: &mut Vec<u8>) -> anyhow::Result<()> {
         if client_interested {
             BittorrentP2pMessage::Interested.encode(output).await?;
         } else {
@@ -322,7 +321,7 @@ impl PeerHandler {
         Ok(())
     }
 
-    async fn send_chocked(&mut self, client_choked: bool, output: &mut Vec<u8>) -> Result<()> {
+    async fn send_chocked(&mut self, client_choked: bool, output: &mut Vec<u8>) -> anyhow::Result<()> {
         if client_choked {
             BittorrentP2pMessage::Choke.encode(output).await?;
         } else {
@@ -334,13 +333,13 @@ impl PeerHandler {
         Ok(())
     }
 
-    async fn send_keep_alive(&self, output: &mut Vec<u8>) -> Result<()> {
+    async fn send_keep_alive(&self, output: &mut Vec<u8>) -> anyhow::Result<()> {
         BittorrentP2pMessage::KeepAlive.encode(output).await?;
 
         Ok(())
     }
 
-    fn add_block_requests_for_piece(&mut self, index: u32) -> Result<()> {
+    fn add_block_requests_for_piece(&mut self, index: u32) -> anyhow::Result<()> {
         let mut leftover_piece_size = piece_size_from_idx(
             self.torrent_metadata.number_of_pieces,
             self.torrent_metadata.total_length,

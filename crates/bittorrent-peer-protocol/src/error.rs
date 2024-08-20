@@ -2,7 +2,6 @@ use std::fmt::Debug;
 
 use thiserror::Error;
 
-// TODO: improve this?
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("an IO error happened: {0}")]

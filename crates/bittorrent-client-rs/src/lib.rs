@@ -11,14 +11,12 @@ pub mod tracker;
 pub mod util;
 
 mod buffer;
-mod error;
 mod peer;
 mod state;
 mod storage;
 
 use std::{future::Future, time::Duration};
 
-pub use error::{Error, Result};
 pub use peer::handle_peer;
 pub use state::torrent::{Torrent, TorrentSharedState};
 pub use storage::{FileStorage, PieceHashVerifier, Storage, StorageManager, TorrentFileMetadata};

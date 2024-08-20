@@ -1,6 +1,6 @@
 use std::{ops::Deref, path::Path};
 
-use crate::{parser::Info, storage::FileInfo, Error, Result};
+use crate::{parser::Info, storage::FileInfo};
 
 #[derive(Debug)]
 pub struct TorrentFileMetadata {
@@ -8,7 +8,7 @@ pub struct TorrentFileMetadata {
 }
 
 impl TorrentFileMetadata {
-    pub fn new(info: &mut Info, base_path: &Path) -> Result<Self> {
+    pub fn new(info: &mut Info, base_path: &Path) -> anyhow::Result<Self> {
         let mut file_infos = Vec::with_capacity(1);
         if let Some(files) = info.files.as_deref() {
             file_infos.reserve(files.len());
@@ -25,7 +25,7 @@ impl TorrentFileMetadata {
             path.push(&*info.name);
 
             let length = info.length.ok_or_else(|| {
-                Error::InternalError(
+                anyhow::anyhow!(
                     "Error while starting up a torrent: the `length` field is missing a single-file download mode",
                 )
             })?;

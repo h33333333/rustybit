@@ -16,7 +16,6 @@ use crate::stats::{DOWNLOADED_BYTES, DOWNLOADED_PIECES, NUMBER_OF_PEERS};
 use crate::storage::StorageOp;
 use crate::torrent_meta::TorrentMeta;
 use crate::util::piece_size_from_idx;
-use crate::Result;
 use tokio::time;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,13 +40,13 @@ pub struct TorrentSharedState {
 }
 
 impl TorrentSharedState {
-    pub fn new(piece_states: Vec<PieceState>, number_of_pieces: usize) -> Result<Self> {
-        Ok(TorrentSharedState {
+    pub fn new(piece_states: Vec<PieceState>, number_of_pieces: usize) -> Self {
+        TorrentSharedState {
             peer_download_stats: HashMap::new(),
             pieces: piece_states,
             piece_download_progress: HashMap::with_capacity(number_of_pieces),
             cancellation_req_queue: VecDeque::new(),
-        })
+        }
     }
 }
 
@@ -129,7 +128,7 @@ impl TorrentSharedState {
                 }
             })
             .take(number_of_pieces)
-            .collect::<Result<Vec<(u32, Option<SocketAddrV4>)>>>()
+            .collect::<anyhow::Result<Vec<(u32, Option<SocketAddrV4>)>>>()
             .context("bug: converting piece index to u32 failed - too many pieces?")
             .map(|vec| if vec.is_empty() { None } else { Some(vec) })?;
 
