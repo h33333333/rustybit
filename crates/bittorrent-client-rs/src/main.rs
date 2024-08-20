@@ -5,12 +5,9 @@ use bittorrent_client_rs::util::read_file;
 use bittorrent_client_rs::{args, parser};
 use clap::Parser;
 
-// TODO: global code refactoring/restructuring
-// TODO: slow speed build up. Can I improve it more?
-// TODO: Improve DHT
-//    - make it find peers faster
-//    - send request not only to nodes but to peers?
 // TODO: improve last pieces downloading speed
+// TODO: can I somehow improve speed buildup time?
+// TODO: make DHT find peers faster?
 
 #[tokio::main]
 #[tracing::instrument(err)]
