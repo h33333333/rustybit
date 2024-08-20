@@ -21,7 +21,7 @@ pub struct Handshake<'a> {
 
 impl<'a> Handshake<'a> {
     pub const FIXED_PART_LENGTH: usize = 1 + 20 + 20 + 8;
-    const DEFAULT_PSTR: &'static str = "BitTorrent protocol";
+    pub const DEFAULT_PSTR: &'static str = "BitTorrent protocol";
 
     pub fn new(info_hash: [u8; 20], peer_id: [u8; 20]) -> Self {
         Handshake {

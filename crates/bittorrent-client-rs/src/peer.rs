@@ -41,13 +41,17 @@ pub async fn handle_peer(
     handshake_message.encode(&mut stream).await?;
 
     let mut read_buf = ReadBuf::new();
-    // TODO: should I use some fields from it?
-    // TODO: verify pstr?
-    let _handshake = read_buf
+    let handshake = read_buf
         .read_handshake(&mut stream)
         .with_timeout("read_handshake", Duration::from_secs(5))
         .await
         .context("reading peer handshake")?;
+
+    if handshake.pstr != Handshake::DEFAULT_PSTR {
+        tracing::debug!("Peer sent a bad PSTR, disconnecting: {}", handshake.pstr);
+
+        anyhow::bail!("bad handshake pstr")
+    }
 
     tracing::trace!("read a handshake");
 
