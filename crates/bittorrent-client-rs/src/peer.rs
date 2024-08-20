@@ -108,7 +108,7 @@ pub async fn handle_peer(
                 && handler.block_requests_queue.len() < PeerHandler::MAX_PENDING_BLOCK_REQUESTS
             {
                 let need_blocks = PeerHandler::MAX_PENDING_BLOCK_REQUESTS - handler.block_requests_queue.len();
-                let number_of_pieces = need_blocks * 3 / handler.get_blocks_per_piece() + 1;
+                let number_of_pieces = need_blocks / handler.get_blocks_per_piece() + 1;
                 let next_pieces = handler
                     .state
                     .write()
@@ -178,8 +178,7 @@ impl PeerHandler {
         PeerHandler {
             peer_addr,
             state,
-            // TODO: this should depend on a number of blocks in a single piece
-            block_requests_queue: VecDeque::with_capacity(10),
+            block_requests_queue: VecDeque::with_capacity(Self::MAX_PENDING_BLOCK_REQUESTS),
             sent_block_requests: Vec::with_capacity(Self::MAX_PENDING_BLOCK_REQUESTS),
             torrent_metadata,
             client_choked: true,
