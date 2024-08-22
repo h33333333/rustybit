@@ -21,11 +21,7 @@ use tokio::time;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PieceState {
     Queued,
-    Downloading {
-        peer: SocketAddrV4,
-        start: Instant,
-        stolen_at: Option<Instant>,
-    },
+    Downloading { peer: SocketAddrV4, start: Instant },
     Downloaded,
     Verified,
 }
@@ -54,7 +50,7 @@ impl TorrentSharedState {
     fn get_piece_steal_coeff(&self) -> f64 {
         let total_pieces = self.pieces.len() as f64;
         let downloaded_pieces = DOWNLOADED_PIECES.load(Ordering::Relaxed) as f64;
-        if downloaded_pieces / total_pieces >= 80. {
+        if downloaded_pieces / total_pieces >= 0.8 {
             3.
         } else {
             10.
@@ -82,42 +78,41 @@ impl TorrentSharedState {
                         *status = PieceState::Downloading {
                             peer: peer_addr,
                             start: Instant::now(),
-                            stolen_at: None,
                         };
                         Some(try_into!(idx, u32).map(|idx| (idx, None)))
                     }
-                    PieceState::Downloading { peer, start, stolen_at } => {
+                    PieceState::Downloading { peer, start } => {
                         let peer = *peer;
                         if peer == peer_addr {
                             return None;
                         }
 
-                        // Don't steal a piece too often
-                        if stolen_at.is_some_and(|instant| instant.elapsed().as_secs_f64() < 5.0) {
+                        let requesting_peer_stats = self.peer_download_stats.entry(peer_addr).or_insert((0., 0.));
+                        if requesting_peer_stats.1 == 0. {
                             return None;
                         }
+                        let requesting_peer_avg_time = requesting_peer_stats.0 / requesting_peer_stats.1;
 
-                        let requesting_peer_stats = self.peer_download_stats.entry(peer_addr).or_insert((0., 0.));
-                        // Compare elapsed time to requesting peer's average piece downloading time
-                        if requesting_peer_stats.1 == 0. {
-                            None
-                        } else if start.elapsed().as_secs_f64()
-                            > (requesting_peer_stats.1 / requesting_peer_stats.0) * piece_steal_coeff
-                        {
-                            let avg_time = requesting_peer_stats.1 / requesting_peer_stats.0;
+                        let elapsed_secs = start.elapsed().as_secs_f64();
+                        // Compare elapsed time to requesting peer's average piece download time
+                        if elapsed_secs > requesting_peer_avg_time * piece_steal_coeff {
                             tracing::debug!(
                                 %peer_addr,
                                 stolen_from=%peer,
                                 piece=%idx,
                                 "stole a piece: elapsed time {}, my avg piece time: {}",
-                                start.elapsed().as_secs_f64(),
-                                avg_time
+                                elapsed_secs,
+                                requesting_peer_avg_time
                             );
-                            let now = Instant::now();
+
+                            // Update the current peer's download stats
+                            let (ref mut cur_peer_piece_download_times_sum, _) =
+                                self.peer_download_stats.entry(peer).or_insert((0., 0.));
+                            *cur_peer_piece_download_times_sum += elapsed_secs;
+
                             *status = PieceState::Downloading {
                                 peer: peer_addr,
-                                start: now,
-                                stolen_at: Some(now),
+                                start: Instant::now(),
                             };
                             Some(try_into!(idx, u32).map(|idx| (idx, Some(peer))))
                         } else {
