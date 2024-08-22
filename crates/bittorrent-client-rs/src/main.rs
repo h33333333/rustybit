@@ -6,7 +6,6 @@ use bittorrent_client_rs::{args, parser};
 use clap::Parser;
 
 // TODO: improve last pieces downloading speed
-// TODO: can I somehow improve speed buildup time?
 // TODO: make DHT find peers faster?
 
 #[tokio::main]

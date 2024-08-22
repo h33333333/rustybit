@@ -171,7 +171,7 @@ struct PeerHandler {
 }
 
 impl PeerHandler {
-    const MAX_PENDING_BLOCK_REQUESTS: usize = 20;
+    const MAX_PENDING_BLOCK_REQUESTS: usize = 70;
 
     pub fn new(state: Arc<RwLock<TorrentSharedState>>, torrent_metadata: TorrentMeta, peer_addr: SocketAddrV4) -> Self {
         PeerHandler {
