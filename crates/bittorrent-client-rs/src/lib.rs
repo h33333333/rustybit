@@ -12,6 +12,7 @@ pub mod util;
 
 mod buffer;
 mod peer;
+mod peer_connection_manager;
 mod state;
 mod storage;
 

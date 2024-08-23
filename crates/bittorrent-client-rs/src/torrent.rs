@@ -1,5 +1,5 @@
 use crate::{
-    handle_peer,
+    peer_connection_manager::PeerConnectionManager,
     state::{
         event::{PeerEvent, TorrentManagerReq},
         torrent::PieceState,
@@ -22,9 +22,9 @@ use tokio::{
         mpsc::{self, unbounded_channel},
         oneshot, RwLock,
     },
-    task::{JoinHandle, JoinSet},
+    task::JoinHandle,
 };
-use tracing::{instrument, Instrument as _};
+use tracing::instrument;
 use url::Url;
 
 use crate::{parser::MetaInfo, util::generate_peer_id};
@@ -157,63 +157,18 @@ impl TorrentManager {
         let peer_id: [u8; 20] = self.peer_id.as_bytes().try_into()?;
 
         let root_handle = tokio::spawn(async move {
-            let (peer_manager_cancel_tx, mut peer_manager_cancel_rx) = oneshot::channel::<()>();
-            let (peer_queue_tx, mut peer_queue_rx) = mpsc::channel(10);
-            let peer_manager_task = tokio::spawn(
-                async move {
-                    let spawn_peer = move |set: &mut JoinSet<anyhow::Result<()>>, peer_addr: SocketAddrV4| {
-                        let peer_state = torrent_state.clone();
-                        let peer_event_tx = peer_event_tx.clone();
-
-                        set.spawn(handle_peer(
-                            peer_addr,
-                            torrent_meta.clone(),
-                            peer_id,
-                            peer_state,
-                            peer_event_tx,
-                            new_peer_tx.clone(),
-                        ));
-                    };
-
-                    let mut n_of_peers = 0;
-                    let mut peer_handler_tasks = JoinSet::new();
-                    // Process all initial peers
-                    for peer_address in peers.into_iter() {
-                        spawn_peer(&mut peer_handler_tasks, peer_address);
-                        n_of_peers += 1;
-                    }
-
-                    loop {
-                        tokio::select! {
-                            Some(next_peer) = peer_queue_rx.recv(), if n_of_peers < 90 => {
-                                spawn_peer(&mut peer_handler_tasks, next_peer);
-                                n_of_peers +=1;
-                            },
-                            Some(peer_handler_result) = peer_handler_tasks.join_next() => {
-                                    n_of_peers -= 1;
-                                    if let Err(e) = peer_handler_result.context("peer handler task")? {
-                                        tracing::debug!("an error happened in a peer: {:#}", e);
-                                    }
-                            }
-                            _ = &mut peer_manager_cancel_rx => {
-                                tracing::debug!("cancellation requested, aborting peer tasks");
-                                peer_handler_tasks.abort_all();
-                                // Wait for all tasks to exit
-                                while let Some(_) = peer_handler_tasks.join_next().await {}
-                                tracing::debug!("all peers were aborted successfully, shutting down the manager");
-                                break;
-                            }
-                            else => {
-                                tracing::debug!("peer queue sender and all peers exited, shutting down the peer manager");
-                                break;
-                            }
-                        }
-                    }
-
-                    Ok::<(), anyhow::Error>(())
-                }
-                .instrument(tracing::error_span!("peer manager task")),
+            let (peer_manager_cancel_tx, peer_manager_cancel_rx) = oneshot::channel::<()>();
+            let (peer_queue_tx, peer_queue_rx) = mpsc::channel(10);
+            let mut peer_manager = PeerConnectionManager::new(
+                peer_id,
+                torrent_state,
+                torrent_meta,
+                peer_queue_rx,
+                peer_event_tx,
+                peer_manager_cancel_rx,
+                new_peer_tx,
             );
+            let peer_manager_task = tokio::spawn(async move { peer_manager.handle(peers).await });
 
             let (dht_cancel_tx, dht_cancel_rx) = oneshot::channel();
 
@@ -229,7 +184,7 @@ impl TorrentManager {
             peer_manager_task
                 .await
                 .context("peer manager task panicked?")?
-                .context("peer manager task")?;
+                .context("peer manager")?;
             dht_requester_task.await.context("dht requester task")??;
             storage_task.await.context("storage task")??;
             stats_cancel_tx
