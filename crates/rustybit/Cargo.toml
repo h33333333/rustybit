@@ -1,5 +1,5 @@
 [package]
-name = "bittorrent-client-rs"
+name = "rustybit"
 version = "0.1.0"
 edition = "2021"
 

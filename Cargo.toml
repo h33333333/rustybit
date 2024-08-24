@@ -2,6 +2,6 @@
 members = ["crates/*"]
 
 [workspace.dependencies]
-bittorrent-peer-protocol = { path = "./crates/bittorrent-peer-protocol/" }
-leechy-dht = { path = "./crates/leechy-dht" }
-serde_bencode = { path = "./crates/serde_bencode" }
+bittorrent-peer-protocol = { path = "./crates/bittorrent-peer-protocol/", package = "rustybit-bittorrent-peer-protocol", version = "1.0.0" }
+leechy-dht = { path = "./crates/leechy-dht", package = "rustybit-leechy-dht", version = "1.0.0" }
+serde_bencode = { path = "./crates/serde_bencode", package = "rustybit-serde-bencode", version = "1.0.0" }

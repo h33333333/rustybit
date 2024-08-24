@@ -1,9 +1,9 @@
 use anyhow::Context;
-use bittorrent_client_rs::logging::setup_logger;
-use bittorrent_client_rs::torrent::TorrentManager;
-use bittorrent_client_rs::util::read_file;
-use bittorrent_client_rs::{args, parser};
 use clap::Parser;
+use rustybit::logging::setup_logger;
+use rustybit::torrent::TorrentManager;
+use rustybit::util::read_file;
+use rustybit::{args, parser};
 
 // TODO: make DHT find peers faster?
 

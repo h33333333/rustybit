@@ -48,7 +48,6 @@ pub async fn handle_peer(
 
     if handshake.pstr != Handshake::DEFAULT_PSTR {
         tracing::debug!("Peer sent a bad PSTR, disconnecting: {}", handshake.pstr);
-
         anyhow::bail!("bad handshake pstr")
     }
 

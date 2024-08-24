@@ -155,48 +155,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b048fb63fd8b5923fc5aa7b340d8e156aec7ec02f0c78fa8a6ddc2613f6f71de"
 
 [[package]]
-name = "bittorrent-client-rs"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bittorrent-peer-protocol",
- "bitvec",
- "bytes",
- "clap",
- "crypto-hash",
- "form_urlencoded",
- "hex 0.4.3",
- "http-body-util",
- "hyper",
- "hyper-util",
- "leechy-dht",
- "rand",
- "reqwest",
- "serde",
- "serde_bencode",
- "serde_bytes",
- "serde_json",
- "serde_urlencoded",
- "serde_with",
- "socket2",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
-name = "bittorrent-peer-protocol"
-version = "0.1.0"
-dependencies = [
- "bitvec",
- "bytes",
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "bitvec"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -895,20 +853,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
-name = "leechy-dht"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "governor",
- "rand",
- "serde",
- "serde_bencode",
- "serde_bytes",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.155"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1436,6 +1380,69 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustybit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bitvec",
+ "bytes",
+ "clap",
+ "crypto-hash",
+ "form_urlencoded",
+ "hex 0.4.3",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rand",
+ "reqwest",
+ "rustybit-bittorrent-peer-protocol",
+ "rustybit-leechy-dht",
+ "rustybit-serde-bencode",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "serde_urlencoded",
+ "serde_with",
+ "socket2",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "rustybit-bittorrent-peer-protocol"
+version = "1.0.0"
+dependencies = [
+ "bitvec",
+ "bytes",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "rustybit-leechy-dht"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "governor",
+ "rand",
+ "rustybit-serde-bencode",
+ "serde",
+ "serde_bytes",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rustybit-serde-bencode"
+version = "1.0.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "ryu"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1486,13 +1493,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e33aedb1a7135da52b7c21791455563facbbcc43d0f0f66165b42c21b3dfb150"
 dependencies = [
  "serde_derive",
-]
-
-[[package]]
-name = "serde_bencode"
-version = "0.1.0"
-dependencies = [
- "serde",
 ]
 
 [[package]]
