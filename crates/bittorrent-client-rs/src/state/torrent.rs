@@ -294,10 +294,12 @@ impl Torrent {
             let mut state = self.shared_state.write().await;
             while let Some((peer_addr, piece_idx)) = state.cancellation_req_queue.pop_front() {
                 if let Some(sender) = self.get_peer_req_tx(&peer_addr) {
-                    sender
-                        .send(TorrentManagerReq::CancelPiece(piece_idx))
-                        .await
-                        .context("sending cancellation request failed")?;
+                    if let Err(e) = sender.send(TorrentManagerReq::CancelPiece(piece_idx)).await {
+                        tracing::debug!(
+                            %peer_addr,
+                            "error while sending a cancellation request: {}", e
+                        );
+                    }
                 }
             }
         }
