@@ -1,7 +1,12 @@
 [package]
 name = "rustybit"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
+description = "A CLI torrent client"
+authors = ["h33333333"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/h33333333/rustybit"
 
 [dependencies]
 bittorrent-peer-protocol.workspace = true
