@@ -1,10 +1,10 @@
-use tokio::{sync::oneshot, time::Instant};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::time::Duration;
+
+use tokio::sync::oneshot;
+use tokio::time::Instant;
 
 use self::buffer::CircularBuffer;
-use std::{
-    sync::atomic::{AtomicU8, AtomicUsize, Ordering},
-    time::Duration,
-};
 
 mod buffer;
 

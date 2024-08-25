@@ -1,19 +1,16 @@
-use crate::requests::{GetPeersQueryMessage, KrpcMessage, KrpcMessageType};
-use crate::util::generate_node_id;
+use std::collections::VecDeque;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs};
+use std::num::NonZeroU32;
+use std::time::Duration;
+
 use anyhow::Context;
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
-use std::net::ToSocketAddrs;
-use std::num::NonZeroU32;
-use std::{
-    collections::VecDeque,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    time::Duration,
-};
-use tokio::{
-    net::UdpSocket,
-    sync::{mpsc, oneshot},
-    time::Instant,
-};
+use tokio::net::UdpSocket;
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::Instant;
+
+use crate::requests::{GetPeersQueryMessage, KrpcMessage, KrpcMessageType};
+use crate::util::generate_node_id;
 
 const DEFAULT_BUF_SIZE: usize = 65_536;
 const INFLIGHT_REQUEST_TIMEOUT_SECS: f64 = 1.;

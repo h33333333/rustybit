@@ -16,7 +16,8 @@ mod peer_connection_manager;
 mod state;
 mod storage;
 
-use std::{future::Future, time::Duration};
+use std::future::Future;
+use std::time::Duration;
 
 pub use peer::handle_peer;
 pub use state::torrent::{Torrent, TorrentSharedState};

@@ -10,13 +10,13 @@ use bitvec::order::Msb0;
 use bitvec::slice::BitSlice;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::sync::RwLock;
+use tokio::time;
 
 use super::event::{PeerEvent, TorrentManagerReq};
 use crate::stats::{DOWNLOADED_BYTES, DOWNLOADED_PIECES, NUMBER_OF_PEERS};
 use crate::storage::StorageOp;
 use crate::torrent_meta::TorrentMeta;
 use crate::util::piece_size_from_idx;
-use tokio::time;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PieceState {

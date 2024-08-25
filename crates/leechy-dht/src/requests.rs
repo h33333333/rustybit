@@ -1,5 +1,7 @@
+use std::borrow::Cow;
+use std::fmt::Debug;
+
 use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, fmt::Debug};
 
 pub trait KrpcQueryMessage<'a> {
     type ResponseType: KrpcResponseMessage<'a>;

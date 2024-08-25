@@ -3,14 +3,13 @@ mod piece_hash_verifier;
 mod storage_manager;
 mod util;
 
-use bittorrent_peer_protocol::Block;
 use std::net::SocketAddrV4;
 use std::path::PathBuf;
 
+use bittorrent_peer_protocol::Block;
 pub use file_storage::FileStorage;
 pub use piece_hash_verifier::PieceHashVerifier;
-pub use storage_manager::StorageManager;
-pub use storage_manager::TorrentFileMetadata;
+pub use storage_manager::{StorageManager, TorrentFileMetadata};
 
 #[derive(Debug)]
 pub struct FileInfo {

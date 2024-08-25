@@ -1,6 +1,7 @@
 use anyhow::Context;
 use bittorrent_peer_protocol::{BittorrentP2pMessage, Decode, Handshake};
-use tokio::{io::AsyncReadExt, net::TcpStream};
+use tokio::io::AsyncReadExt;
+use tokio::net::TcpStream;
 
 pub struct ReadBuf {
     inner: Vec<u8>,

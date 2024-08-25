@@ -2,12 +2,10 @@ use std::io::Write;
 
 use anyhow::Context;
 
-use crate::{state::torrent::PieceState, util::piece_size_from_idx};
-
-use super::{
-    util::{find_file_offsets_for_data, read_data_from_files},
-    FileInfo, Storage,
-};
+use super::util::{find_file_offsets_for_data, read_data_from_files};
+use super::{FileInfo, Storage};
+use crate::state::torrent::PieceState;
+use crate::util::piece_size_from_idx;
 
 pub struct PieceHashVerifier {
     piece_length: usize,

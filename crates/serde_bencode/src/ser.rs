@@ -2,7 +2,8 @@ use std::io::Write;
 
 use serde::Serialize;
 
-use crate::{error::Error, ErrorKind};
+use crate::error::Error;
+use crate::ErrorKind;
 
 pub struct Serializer<'a, W: Write> {
     output: &'a mut W,

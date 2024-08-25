@@ -2,17 +2,14 @@ mod file_metadata;
 
 use std::net::SocketAddrV4;
 
-pub use file_metadata::TorrentFileMetadata;
-
 use anyhow::Context;
 use bittorrent_peer_protocol::Block;
+pub use file_metadata::TorrentFileMetadata;
 use tokio::sync::mpsc;
 
-use super::{
-    piece_hash_verifier::PieceHashVerifier,
-    util::{find_file_offsets_for_data, write_data_to_files},
-    Storage, StorageOp,
-};
+use super::piece_hash_verifier::PieceHashVerifier;
+use super::util::{find_file_offsets_for_data, write_data_to_files};
+use super::{Storage, StorageOp};
 
 pub struct StorageManager<'a> {
     storage: &'a mut dyn Storage,

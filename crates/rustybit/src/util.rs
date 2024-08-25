@@ -1,6 +1,8 @@
-use std::{fs, io::Read as _};
+use std::fs;
+use std::io::Read as _;
 
-use rand::{distributions::Alphanumeric, Rng};
+use rand::distributions::Alphanumeric;
+use rand::Rng;
 
 pub fn generate_peer_id() -> String {
     let mut rng = rand::thread_rng();

@@ -1,33 +1,27 @@
-use crate::{
-    peer_connection_manager::PeerConnectionManager,
-    state::{
-        event::{PeerEvent, TorrentManagerReq},
-        torrent::PieceState,
-    },
-    stats::{Stats, DOWNLOADED_BYTES, DOWNLOADED_PIECES},
-    storage::{FileInfo, StorageOp},
-    torrent_meta::TorrentMeta,
-    tracker, FileStorage, PieceHashVerifier, Storage, StorageManager, Torrent, TorrentFileMetadata, TorrentSharedState,
-};
-use std::{
-    net::SocketAddrV4,
-    path::PathBuf,
-    sync::{atomic::Ordering, Arc},
-};
+use std::net::SocketAddrV4;
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use anyhow::Context;
 use leechy_dht::DhtRequester;
-use tokio::{
-    sync::{
-        mpsc::{self, unbounded_channel},
-        oneshot, RwLock,
-    },
-    task::JoinHandle,
-};
+use tokio::sync::mpsc::{self, unbounded_channel};
+use tokio::sync::{oneshot, RwLock};
+use tokio::task::JoinHandle;
 use tracing::instrument;
 use url::Url;
 
-use crate::{parser::MetaInfo, util::generate_peer_id};
+use crate::parser::MetaInfo;
+use crate::peer_connection_manager::PeerConnectionManager;
+use crate::state::event::{PeerEvent, TorrentManagerReq};
+use crate::state::torrent::PieceState;
+use crate::stats::{Stats, DOWNLOADED_BYTES, DOWNLOADED_PIECES};
+use crate::storage::{FileInfo, StorageOp};
+use crate::torrent_meta::TorrentMeta;
+use crate::util::generate_peer_id;
+use crate::{
+    tracker, FileStorage, PieceHashVerifier, Storage, StorageManager, Torrent, TorrentFileMetadata, TorrentSharedState,
+};
 
 #[derive(Debug)]
 pub struct TorrentManager {

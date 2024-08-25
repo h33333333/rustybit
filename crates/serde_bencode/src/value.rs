@@ -1,5 +1,8 @@
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::marker::PhantomData;
+
 use serde::{Deserialize, Deserializer, Serialize};
-use std::{borrow::Cow, collections::HashMap, marker::PhantomData};
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Hash)]
 pub struct Bytes<'a>(Cow<'a, [u8]>);

@@ -1,18 +1,14 @@
-use std::{net::SocketAddrV4, sync::Arc};
+use std::net::SocketAddrV4;
+use std::sync::Arc;
 
 use anyhow::Context as _;
-use tokio::{
-    sync::{mpsc, oneshot, RwLock},
-    task::JoinSet,
-};
+use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::task::JoinSet;
 use tracing::instrument;
 
-use crate::{
-    handle_peer,
-    state::event::{PeerEvent, TorrentManagerReq},
-    torrent_meta::TorrentMeta,
-    TorrentSharedState,
-};
+use crate::state::event::{PeerEvent, TorrentManagerReq};
+use crate::torrent_meta::TorrentMeta;
+use crate::{handle_peer, TorrentSharedState};
 
 #[derive(Debug)]
 pub struct PeerConnectionManager {

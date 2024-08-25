@@ -1,6 +1,8 @@
-use std::{ops::Deref, path::Path};
+use std::ops::Deref;
+use std::path::Path;
 
-use crate::{parser::Info, storage::FileInfo};
+use crate::parser::Info;
+use crate::storage::FileInfo;
 
 #[derive(Debug)]
 pub struct TorrentFileMetadata {

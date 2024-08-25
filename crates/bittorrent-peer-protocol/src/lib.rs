@@ -3,9 +3,10 @@ mod macros;
 mod error;
 mod messages;
 
+use std::future::Future;
+
 pub use error::Error;
 pub use messages::{BittorrentP2pMessage, Block, BlockRequest, Handshake, MessageId};
-use std::future::Future;
 use tokio::io::AsyncWriteExt;
 
 pub type Result<T> = std::result::Result<T, Error>;

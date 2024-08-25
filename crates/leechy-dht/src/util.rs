@@ -1,4 +1,5 @@
-use rand::{distributions::Alphanumeric, Rng};
+use rand::distributions::Alphanumeric;
+use rand::Rng;
 
 pub fn generate_node_id() -> [u8; 20] {
     let mut id = [0u8; 20];

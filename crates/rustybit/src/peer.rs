@@ -1,15 +1,12 @@
-use crate::state::torrent::PieceState;
-use crate::torrent_meta::TorrentMeta;
-use crate::util::piece_size_from_idx;
-use crate::{Elapsed, TorrentSharedState, WithTimeout, DEFAULT_BLOCK_SIZE};
-use anyhow::Context;
-use bittorrent_peer_protocol::{BittorrentP2pMessage, Block, BlockRequest, Encode, Handshake};
-use bitvec::order::Msb0;
-use bitvec::vec::BitVec;
 use std::collections::VecDeque;
 use std::net::SocketAddrV4;
 use std::sync::Arc;
 use std::time::Duration;
+
+use anyhow::Context;
+use bittorrent_peer_protocol::{BittorrentP2pMessage, Block, BlockRequest, Encode, Handshake};
+use bitvec::order::Msb0;
+use bitvec::vec::BitVec;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self};
@@ -18,6 +15,10 @@ use tokio::time;
 
 use crate::buffer::ReadBuf;
 use crate::state::event::{PeerEvent, TorrentManagerReq};
+use crate::state::torrent::PieceState;
+use crate::torrent_meta::TorrentMeta;
+use crate::util::piece_size_from_idx;
+use crate::{Elapsed, TorrentSharedState, WithTimeout, DEFAULT_BLOCK_SIZE};
 
 #[tracing::instrument(level = "error", err(level = tracing::Level::DEBUG), skip_all, fields(%peer_addr))]
 pub async fn handle_peer(

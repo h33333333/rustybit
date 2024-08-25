@@ -1,5 +1,7 @@
+use std::borrow::Cow;
+use std::io::Cursor;
+
 use bytes::Buf;
-use std::{borrow::Cow, io::Cursor};
 use tokio::io::AsyncWriteExt;
 
 use crate::{Decode, Encode, Result};

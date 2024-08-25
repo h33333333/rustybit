@@ -1,10 +1,11 @@
-use crate::{Decode, Encode, Error, Result};
+use std::io::Cursor;
+
 use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
-use bytes::Buf;
-use bytes::Bytes;
-use std::io::Cursor;
+use bytes::{Buf, Bytes};
 use tokio::io::AsyncWriteExt;
+
+use crate::{Decode, Encode, Error, Result};
 
 #[derive(Debug)]
 pub enum MessageId {
