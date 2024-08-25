@@ -1,7 +1,12 @@
 [package]
-name = "serde_bencode"
-version = "0.1.0"
+name = "rustybit-serde-bencode"
+version = "1.0.0"
 edition = "2021"
+description = "A bencode  serializing/deserializing library powered by Serde"
+keywords = ["serialize", "deserialize", "serde", "bencode"]
+authors = ["h33333333"]
+license = "Apache-2.0"
+repository = "https://github.com/h33333333/rustybit"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

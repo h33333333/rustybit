@@ -1,7 +1,12 @@
 [package]
-name = "leechy-dht"
-version = "0.1.0"
+name = "rustybit-leechy-dht"
+version = "1.0.0"
 edition = "2021"
+description = "A partial (leechy) DHT implementation"
+keywords = ["DHT"]
+authors = ["h33333333"]
+license = "Apache-2.0"
+repository = "https://github.com/h33333333/rustybit"
 
 [dependencies]
 serde_bencode.workspace = true
