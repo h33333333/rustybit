@@ -1,6 +1,6 @@
 [package]
 name = "rustybit"
-version = "1.0.1"
+version = "2.0.0"
 edition = "2021"
 description = "A CLI bittorrent client"
 authors = ["h33333333"]
@@ -9,12 +9,15 @@ keywords = ["cli", "client", "bittorrent"]
 license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/h33333333/rustybit"
+documentation = "https://github.com/h33333333/rustybit"
 
 [dependencies]
-bittorrent-peer-protocol.workspace = true
-leechy-dht.workspace = true
+rustybit-lib.workspace = true
 serde_bencode.workspace = true
 clap = { version = "4.3.14", features = ["derive", "string"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+anyhow = "^1.0.8"
 tokio = { version = "1", features = [
     "fs",
     "net",
@@ -22,24 +25,3 @@ tokio = { version = "1", features = [
     "macros",
     "rt-multi-thread",
 ] }
-serde = { version = "1.0", features = ["derive"] }
-thiserror = "1.0"
-serde_with = "3.1.0"
-rand = "0.8.5"
-reqwest = { version = "0.12.4", features = ["json", "gzip"] }
-serde_urlencoded = "0.7"
-form_urlencoded = "1.2.0"
-hex = "0.4.3"
-hyper = { version = "1.1.0", features = ["client", "full"] }
-hyper-util = { version = "0.1.2", features = ["full"] }
-http-body-util = "0.1.0"
-url = "2.5.0"
-serde_json = "1.0.108"
-socket2 = "0.5.5"
-bitvec = "1.0.1"
-bytes = "1.5.0"
-anyhow = "^1.0.8"
-tracing = "0.1.40"
-tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-crypto-hash = "^0.3"
-serde_bytes = "0.11.15"

@@ -1,6 +1,3 @@
-use std::fs;
-use std::io::Read as _;
-
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 
@@ -25,11 +22,4 @@ pub fn piece_size_from_idx(number_of_pieces: usize, total_length: usize, piece_s
     };
 
     size
-}
-
-pub fn read_file(path: &str) -> anyhow::Result<Vec<u8>> {
-    let mut buffer = vec![];
-    let mut file = fs::File::open(path)?;
-    file.read_to_end(&mut buffer)?;
-    Ok(buffer)
 }

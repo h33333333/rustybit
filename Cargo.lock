@@ -1381,34 +1381,15 @@ dependencies = [
 
 [[package]]
 name = "rustybit"
-version = "1.0.1"
+version = "2.0.0"
 dependencies = [
  "anyhow",
- "bitvec",
- "bytes",
  "clap",
- "crypto-hash",
- "form_urlencoded",
- "hex 0.4.3",
- "http-body-util",
- "hyper",
- "hyper-util",
- "rand",
- "reqwest",
- "rustybit-bittorrent-peer-protocol",
- "rustybit-leechy-dht",
+ "rustybit-lib",
  "rustybit-serde-bencode",
- "serde",
- "serde_bytes",
- "serde_json",
- "serde_urlencoded",
- "serde_with",
- "socket2",
- "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "url",
 ]
 
 [[package]]
@@ -1433,6 +1414,35 @@ dependencies = [
  "serde_bytes",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "rustybit-lib"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "bitvec",
+ "bytes",
+ "crypto-hash",
+ "form_urlencoded",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rand",
+ "reqwest",
+ "rustybit-bittorrent-peer-protocol",
+ "rustybit-leechy-dht",
+ "rustybit-serde-bencode",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "serde_urlencoded",
+ "serde_with",
+ "socket2",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]

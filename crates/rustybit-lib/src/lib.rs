@@ -1,8 +1,5 @@
 #[macro_use]
 pub mod macros;
-
-pub mod args;
-pub mod logging;
 pub mod parser;
 pub mod stats;
 pub mod torrent;
@@ -16,12 +13,12 @@ mod peer_connection_manager;
 mod state;
 mod storage;
 
-use std::future::Future;
-use std::time::Duration;
-
 pub use peer::handle_peer;
 pub use state::torrent::{Torrent, TorrentSharedState};
 pub use storage::{FileStorage, PieceHashVerifier, Storage, StorageManager, TorrentFileMetadata};
+
+use std::future::Future;
+use std::time::Duration;
 
 pub(crate) const DEFAULT_BLOCK_SIZE: u32 = 16_384;
 
