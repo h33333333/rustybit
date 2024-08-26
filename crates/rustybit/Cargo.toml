@@ -1,9 +1,11 @@
 [package]
 name = "rustybit"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "A CLI bittorrent client"
 authors = ["h33333333"]
+categories = ["command-line-utilities"]
+keywords = ["cli", "client", "bittorrent"]
 license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/h33333333/rustybit"
